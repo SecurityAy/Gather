@@ -21,12 +21,27 @@ type Theme = "light" | "dark";
 const ThemeContext = createContext<{ theme: Theme; setTheme: (theme: Theme) => void } | null>(null);
 
 function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setTheme] = useState<Theme>(() => localStorage.getItem("gather.theme") === "dark" ? "dark" : "light");
+  const [theme, setThemeState] = useState<Theme>(() => localStorage.getItem("gather.theme") === "dark" ? "dark" : "light");
+  const transitionTimer = useRef<number | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("gather.theme", theme);
   }, [theme]);
+
+  const setTheme = (nextTheme: Theme) => {
+    if (nextTheme === theme) return;
+    const root = document.documentElement;
+    if (!window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      root.classList.add("theme-transition");
+      if (transitionTimer.current !== null) window.clearTimeout(transitionTimer.current);
+      transitionTimer.current = window.setTimeout(() => {
+        root.classList.remove("theme-transition");
+        transitionTimer.current = null;
+      }, 420);
+    }
+    setThemeState(nextTheme);
+  };
 
   return <ThemeContext.Provider value={{ theme, setTheme }}>{children}</ThemeContext.Provider>;
 }
@@ -444,6 +459,7 @@ function EventWizard() {
   const existing = eventId ? getEvent(eventId) : undefined;
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
+  const [stepDirection, setStepDirection] = useState<"forward" | "backward">("forward");
   const [error, setError] = useState("");
   const [imageProgress, setImageProgress] = useState<number | null>(null);
   const [saving, setSaving] = useState(false);
@@ -472,6 +488,11 @@ function EventWizard() {
     return () => { active = false; };
   }, [eventId]);
   const set = (key: keyof EventRecord, value: string | number) => setForm((current) => ({ ...current, [key]: value }));
+  const changeStep = (nextStep: number) => {
+    if (nextStep === step) return;
+    setStepDirection(nextStep > step ? "forward" : "backward");
+    setStep(nextStep);
+  };
   const validateStep = () => {
     if (step === 0 && (!form.title.trim() || !form.category)) return "Add an event title and choose a celebration type to continue.";
     if (step === 1 && (!form.graduateName.trim() || !form.institution.trim())) return "Add your name and institution to continue.";
@@ -485,7 +506,7 @@ function EventWizard() {
     const problem = validateStep();
     if (problem) { setError(problem); return; }
     setError("");
-    setStep((current) => Math.min(current + 1, wizardLabels.length - 1));
+    changeStep(Math.min(step + 1, wizardLabels.length - 1));
   };
   const persist = async (publish: boolean) => {
     setSaving(true);
@@ -495,10 +516,13 @@ function EventWizard() {
       if (publish && saved.status !== "Published") {
         await publishEvent(saved.id);
       }
-      notify(publish
+      const coverNotice = form.coverImage?.startsWith("data:image/")
+        ? " The cover image is saved in this browser; shared image uploads aren't connected yet."
+        : "";
+      notify(`${publish
         ? "Your invitation is live. Share it with your people."
-        : saved.status === "Published" ? "Your event updates have been saved." : "Your event has been saved as a draft.");
-      navigate(`/dashboard/events/${saved.id}`);
+        : saved.status === "Published" ? "Your event updates have been saved." : "Your event has been saved as a draft."}${coverNotice}`);
+      navigate(`/dashboard/events/${saved.id}`, { state: publish ? { justPublished: true } : null });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -526,23 +550,25 @@ function EventWizard() {
   return <div className="page-stack wizard-page">
     <div className="wizard-topline"><Link to="/dashboard/events" className="back-link"><ArrowLeft size={15} /> All events</Link><span className="draft-save-indicator"><i /> Changes save to Gather</span></div>
     <div className="wizard-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> {existing ? "MAKE A FEW CHANGES" : "A NEW CELEBRATION"}</div><h1>{existing ? "Edit your event" : "Let's make it yours."}</h1><p>Thoughtful details make the best invitations. You can always come back to these.</p></div><span className="step-counter">0{step + 1} <i>/</i> 06</span></div>
-    <div className="wizard-progress">{wizardLabels.map((label, index) => <button type="button" className={`wizard-step ${index === step ? "current" : ""} ${index < step ? "complete" : ""}`} key={label} onClick={() => index < step && setStep(index)} disabled={index > step}><span className="wizard-step-dot">{index < step ? <Check size={13} /> : `0${index + 1}`}</span><span>{label}</span></button>)}</div>
+    <div className="wizard-progress" role="group" aria-label={`Step ${step + 1} of ${wizardLabels.length}`}><span className="wizard-progress-track" aria-hidden="true"><span style={{ width: `${step / (wizardLabels.length - 1) * 100}%` }} /></span>{wizardLabels.map((label, index) => <button type="button" className={`wizard-step ${index === step ? "current" : ""} ${index < step ? "complete" : ""}`} key={label} onClick={() => index < step && changeStep(index)} disabled={index > step} aria-current={index === step ? "step" : undefined}><span className="wizard-step-dot">{index < step ? <Check size={13} /> : `0${index + 1}`}</span><span>{label}</span></button>)}</div>
     <div className="wizard-layout"><div className="wizard-form panel">
       <div className="wizard-panel-heading"><span className="panel-kicker">STEP 0{step + 1} OF 06</span><h2>{["Start with the basics", "Tell us about you", "Set the scene", "Make room for your people", "A few personal touches", "Take a look"][step]}</h2><p>{["A name and a few words to set the tone.", "A little context makes your invitation feel like you.", "Give your guests everything they need to be there.", "You decide how many extra seats each guest can bring.", "Make the invitation feel like your kind of celebration.", "Everything together, just as your guests will see it."][step]}</p></div>
+      <div key={step} className={`wizard-step-content wizard-step-${stepDirection}`}>
       {step === 0 && <div className="form-grid"><div className="field field-span"><label htmlFor="title">Event title <span className="required-star">*</span></label><input id="title" value={form.title} onChange={(e) => set("title", e.target.value)} placeholder="e.g. The Next Chapter" maxLength={70} /></div><div className="field"><label htmlFor="category">What are you celebrating? <span className="required-star">*</span></label><select id="category" value={form.category} onChange={(e) => set("category", e.target.value)}><option value="">Choose a celebration</option>{categories.map((category) => <option key={category}>{category}</option>)}</select></div><div className="field field-span"><label htmlFor="description">A little about the day</label><textarea id="description" rows={3} value={form.description} onChange={(e) => set("description", e.target.value)} placeholder="Tell your guests what this day means to you…" maxLength={300} /><span className="field-foot">{form.description.length}/300</span></div></div>}
       {step === 1 && <div className="form-grid"><div className="field field-span"><label htmlFor="graduateName">Your name <span className="required-star">*</span></label><input id="graduateName" value={form.graduateName} onChange={(e) => set("graduateName", e.target.value)} /></div><div className="field field-span"><label htmlFor="institution">Institution <span className="required-star">*</span></label><input id="institution" value={form.institution} onChange={(e) => set("institution", e.target.value)} placeholder="University or college" /></div><div className="field"><label htmlFor="faculty">Faculty</label><input id="faculty" value={form.faculty} onChange={(e) => set("faculty", e.target.value)} placeholder="Faculty of…" /></div><div className="field"><label htmlFor="department">Department</label><input id="department" value={form.department} onChange={(e) => set("department", e.target.value)} placeholder="Your department" /></div><div className="field field-span"><label htmlFor="qualification">Qualification <span className="optional-label">OPTIONAL</span></label><input id="qualification" value={form.qualification} onChange={(e) => set("qualification", e.target.value)} placeholder="e.g. B.A. English" /></div></div>}
       {step === 2 && <div className="form-grid"><div className="field"><label htmlFor="startAt">Date & start time <span className="required-star">*</span></label><input id="startAt" type="datetime-local" value={form.startAt} onChange={(e) => set("startAt", e.target.value)} /></div><div className="field"><label htmlFor="endAt">End time <span className="optional-label">OPTIONAL</span></label><input id="endAt" type="datetime-local" value={form.endAt} onChange={(e) => set("endAt", e.target.value)} /></div><div className="field field-span"><label htmlFor="timezone">Time zone <span className="required-star">*</span></label><select id="timezone" value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>{Array.from(new Set([form.timezone, "Africa/Lagos", "UTC", "Europe/London", "America/New_York"])).map((zone) => <option key={zone}>{zone}</option>)}</select><span className="field-foot">Times on your invitation use this time zone.</span></div><div className="field field-span"><label htmlFor="venue">Venue name <span className="required-star">*</span></label><input id="venue" value={form.venue} onChange={(e) => set("venue", e.target.value)} placeholder="Where the magic happens" /></div><div className="field field-span"><label htmlFor="address">Full address <span className="required-star">*</span></label><input id="address" value={form.address} onChange={(e) => set("address", e.target.value)} placeholder="Street, area, city" /></div><div className="field field-span"><label htmlFor="instructions">A note for getting there <span className="optional-label">OPTIONAL</span></label><textarea id="instructions" rows={2} value={form.instructions} onChange={(e) => set("instructions", e.target.value)} placeholder="Parking, entrance, what to look for…" /></div></div>}
       {step === 3 && <div className="form-grid"><div className="field field-span"><label htmlFor="rsvpDeadline">Please reply by <span className="required-star">*</span></label><input id="rsvpDeadline" type="date" value={form.rsvpDeadline} onChange={(e) => set("rsvpDeadline", e.target.value)} /></div><div className="field field-span"><label htmlFor="additionalLimit">Additional guests per invitation</label><div className="limit-select"><button type="button" onClick={() => set("additionalLimit", Math.max(0, form.additionalLimit - 1))} aria-label="Remove one additional guest">−</button><span><b>{form.additionalLimit}</b><small>extra {form.additionalLimit === 1 ? "guest" : "guests"} allowed</small></span><button type="button" onClick={() => set("additionalLimit", Math.min(3, form.additionalLimit + 1))} aria-label="Add one additional guest">+</button></div><span className="field-foot">Your guests can bring themselves plus up to {form.additionalLimit} additional people.</span></div><div className="approval-note"><ShieldCheck size={17} /><span><b>You'll review every RSVP.</b><small>Guests get their tickets after you approve their group.</small></span></div></div>}
-      {step === 4 && <div className="form-grid"><div className="field field-span"><label htmlFor="personalMessage">A personal note for your guests</label><textarea id="personalMessage" rows={4} value={form.personalMessage} onChange={(e) => set("personalMessage", e.target.value)} placeholder="I couldn't have made it here without the people I love…" /><span className="field-foot">A few words from you make it feel extra special.</span></div><div className="field field-span"><label>Cover image <span className="optional-label">OPTIONAL</span></label>{form.coverImage ? <div className="upload-preview" style={{ backgroundImage: `url(${form.coverImage})` }}><button type="button" onClick={() => setForm((current) => ({ ...current, coverImage: "" }))} aria-label="Remove cover image"><X size={15} /></button></div> : <label className="upload-zone"><ImagePlus size={22} /><b>{imageProgress === null ? "Choose a cover image" : "Preparing your image…"}</b><span>{imageProgress === null ? "JPG or PNG · up to 1.5 MB" : `${imageProgress}% ready`}</span><input type="file" accept="image/*" disabled={imageProgress !== null} onChange={(e) => handleImage(e.target.files?.[0])} /></label>}</div><div className="field field-span"><PhotoGalleryEditor photos={form.galleryImages || []} onChange={(galleryImages) => setForm((current) => ({ ...current, galleryImages }))} /><span className="field-foot">Only photos you mark as published appear on your public invitation.</span></div><div className="field field-span"><label>Invitation accent</label><div className="accent-picker">{["#b18a55", "#71826b", "#9d7580", "#64748b", "#292d28"].map((color) => <button type="button" key={color} style={{ background: color }} className={form.accent === color ? "accent-selected" : ""} onClick={() => set("accent", color)} aria-label={`Choose accent ${color}`} />)}<span>Keep it warm, or choose a shade that feels like you.</span></div></div></div>}
+      {step === 4 && <div className="form-grid"><div className="field field-span"><label htmlFor="personalMessage">A personal note for your guests</label><textarea id="personalMessage" rows={4} value={form.personalMessage} onChange={(e) => set("personalMessage", e.target.value)} placeholder="I couldn't have made it here without the people I love…" /><span className="field-foot">A few words from you make it feel extra special.</span></div><div className="field field-span"><label>Cover image <span className="optional-label">OPTIONAL</span></label>{form.coverImage ? <div className="upload-preview" style={{ backgroundImage: `url(${form.coverImage})` }}><button type="button" onClick={() => setForm((current) => ({ ...current, coverImage: "" }))} aria-label="Remove cover image"><X size={15} /></button></div> : <label className="upload-zone"><ImagePlus size={22} /><b>{imageProgress === null ? "Choose a cover image" : "Preparing your image…"}</b><span>{imageProgress === null ? "JPG or PNG · up to 1.5 MB" : `${imageProgress}% ready`}</span><input type="file" accept="image/*" disabled={imageProgress !== null} onChange={(e) => handleImage(e.target.files?.[0])} /></label>}<span className="field-foot cover-storage-note">Your uploaded cover appears behind the invitation text. Cover images are saved in this browser until server image uploads are connected.</span></div><div className="field field-span"><PhotoGalleryEditor photos={form.galleryImages || []} onChange={(galleryImages) => setForm((current) => ({ ...current, galleryImages }))} /><span className="field-foot">Only photos you mark as published appear on your public invitation.</span></div><div className="field field-span"><label>Invitation accent</label><div className="accent-picker">{["#b18a55", "#71826b", "#9d7580", "#64748b", "#292d28"].map((color) => <button type="button" key={color} style={{ background: color }} className={form.accent === color ? "accent-selected" : ""} onClick={() => set("accent", color)} aria-label={`Choose accent ${color}`} />)}<span>Keep it warm, or choose a shade that feels like you.</span></div></div></div>}
       {step === 5 && <InvitationMiniPreview event={form} />}
+      </div>
       {error && <div className="inline-error wizard-error" role="alert"><XCircle size={16} />{error}</div>}
-      <div className="wizard-footer"><button className="button button-outline" disabled={saving} onClick={() => step === 0 ? navigate("/dashboard/events") : setStep((current) => current - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" disabled={saving} onClick={() => void persist(false)}>{saving ? "Saving…" : "Save as draft"}</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" disabled={saving} onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" disabled={saving} onClick={() => void persist(true)}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <><Sparkles size={15} /> Publish event</>}</button>}</div></div>
-    </div><aside className="wizard-aside"><div className="wizard-aside-art"><span>✳</span><div className="aside-mini-card"><small>YOU'RE INVITED</small><b>{form.title || "Your celebration"}</b><i>{form.graduateName}</i><span className="aside-mini-line" /><small>{form.startAt ? formatDate(form.startAt, { day: "numeric", month: "long", year: "numeric" }).toUpperCase() : "YOUR SPECIAL DAY"} · LAGOS</small></div></div><div className="wizard-tip"><Sparkles size={16} /><span><b>A little note</b><small>You can edit everything later. Your invitation isn't shared until you publish it.</small></span></div><div className="wizard-help"><CircleHelp size={16} /><span>Need inspiration?</span><a href="#preview" onClick={(event) => { event.preventDefault(); setStep(5); }}>See your invitation preview</a></div></aside></div>
+      <div className="wizard-footer"><button className="button button-outline" disabled={saving} onClick={() => step === 0 ? navigate("/dashboard/events") : changeStep(step - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" disabled={saving} onClick={() => void persist(false)}>{saving ? "Saving…" : "Save as draft"}</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" disabled={saving} onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" disabled={saving} onClick={() => void persist(true)}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <><Sparkles size={15} /> Publish event</>}</button>}</div></div>
+    </div><aside className="wizard-aside"><div className="wizard-aside-art"><span>✳</span><div className="aside-mini-card"><small>YOU'RE INVITED</small><b>{form.title || "Your celebration"}</b><i>{form.graduateName}</i><span className="aside-mini-line" /><small>{form.startAt ? formatDate(form.startAt, { day: "numeric", month: "long", year: "numeric" }).toUpperCase() : "YOUR SPECIAL DAY"} · LAGOS</small></div></div><div className="wizard-tip"><Sparkles size={16} /><span><b>A little note</b><small>You can edit everything later. Your invitation isn't shared until you publish it.</small></span></div><div className="wizard-help"><CircleHelp size={16} /><span>Need inspiration?</span><a href="#preview" onClick={(event) => { event.preventDefault(); changeStep(5); }}>See your invitation preview</a></div></aside></div>
   </div>;
 }
 
 function InvitationMiniPreview({ event }: { event: EventRecord }) {
-  return <div className="mini-invitation" style={{ borderColor: `${event.accent}55` }}><div className="mini-invitation-art" style={{ backgroundColor: event.accent }}><span>✳</span><div className="mini-monogram">{event.graduateName?.charAt(0) || "G"}</div><small>WITH JOY IN OUR HEARTS</small></div><div className="mini-invitation-copy"><span className="event-category">{event.category || "A CELEBRATION"}</span><h2>{event.title || "Your celebration"}</h2><p>Join {event.graduateName || "your graduate"} as they celebrate their next chapter.</p><span><CalendarDays size={14} /> {formatDate(event.startAt)}</span><span><MapPin size={14} /> {event.venue || "Venue to be confirmed"}</span><button className="button button-dark button-sm">RSVP now</button></div></div>;
+  return <div className="mini-invitation" style={{ borderColor: `${event.accent}55` }}><div className={`mini-invitation-art${event.coverImage ? " has-cover" : ""}`} style={{ backgroundColor: event.accent, ...(event.coverImage ? { backgroundImage: `linear-gradient(rgba(28, 30, 26, .5), rgba(28, 30, 26, .62)), url(${event.coverImage})` } : {}) }}><span>✳</span><div className="mini-monogram">{event.graduateName?.charAt(0) || "G"}</div><small>WITH JOY IN OUR HEARTS</small></div><div className="mini-invitation-copy"><span className="event-category">{event.category || "A CELEBRATION"}</span><h2 key={event.title}>{event.title || "Your celebration"}</h2><p key={`${event.graduateName}:${event.title}`}>Join {event.graduateName || "your graduate"} as they celebrate their next chapter.</p><span key={event.startAt}><CalendarDays size={14} /> {formatDate(event.startAt)}</span><span key={event.venue}><MapPin size={14} /> {event.venue || "Venue to be confirmed"}</span><button className="button button-dark button-sm">RSVP now</button></div></div>;
 }
 
 function PublicEventPage() {
@@ -598,7 +624,7 @@ function Countdown({ startAt }: { startAt: string }) {
   const minutes = Math.floor(secondsLeft / 60) % 60;
   const seconds = secondsLeft % 60;
   const upcoming = secondsLeft > 0;
-  return <section className="countdown-wrap"><div><span className="panel-kicker">{upcoming ? "THE COUNTDOWN IS ON" : "THE DAY HAS ARRIVED"}</span><h2>{upcoming ? "Until we celebrate together…" : "What a day to remember."}</h2></div>{upcoming ? <div className="countdown">{[[days, "DAYS"], [hours, "HOURS"], [minutes, "MINUTES"], [seconds, "SECONDS"]].map(([value, label]) => <div key={String(label)}><b>{String(value).padStart(2, "0")}</b><small>{label}</small></div>)}</div> : <span className="completed-pill"><CheckCircle2 size={16} /> Celebration day</span>}</section>;
+  return <section className="countdown-wrap"><div><span className="panel-kicker">{upcoming ? "THE COUNTDOWN IS ON" : "THE DAY HAS ARRIVED"}</span><h2>{upcoming ? "Until we celebrate together…" : "What a day to remember."}</h2></div>{upcoming ? <div className="countdown">{[[days, "DAYS"], [hours, "HOURS"], [minutes, "MINUTES"], [seconds, "SECONDS"]].map(([value, label]) => { const formatted = String(value).padStart(2, "0"); return <div key={String(label)}><b key={formatted} className="countdown-digit">{formatted}</b><small>{label}</small></div>; })}</div> : <span className="completed-pill"><CheckCircle2 size={16} /> Celebration day</span>}</section>;
 }
 
 async function downloadGalleryZip(images: GalleryImage[], onProgress: (progress: number) => void) {
@@ -652,9 +678,15 @@ function PublicGallery({ images }: { images: GalleryImage[] }) {
 }
 
 function ImageLightbox({ images, active, onSelect, onClose }: { images: string[]; active: number; onSelect: (index: number) => void; onClose: () => void }) {
+  const [closing, setClosing] = useState(false);
   const previous = () => onSelect((active - 1 + images.length) % images.length);
   const next = () => onSelect((active + 1) % images.length);
-  return <div className="gallery-lightbox" role="dialog" aria-modal="true" aria-label="Photo viewer" onClick={onClose}><button className="lightbox-close" onClick={onClose} aria-label="Close photo viewer"><X size={20} /></button><button className="lightbox-nav lightbox-prev" onClick={(event) => { event.stopPropagation(); previous(); }} aria-label="Previous photo"><ChevronLeft size={22} /></button><img src={images[active]} alt={`Photo ${active + 1} of ${images.length}`} onClick={(event) => event.stopPropagation()} /><div className="lightbox-controls" onClick={(event) => event.stopPropagation()}><span>{String(active + 1).padStart(2, "0")} / {String(images.length).padStart(2, "0")}</span><a href={images[active]} download={`gather-memory-${active + 1}.jpg`} className="button button-light button-sm"><Download size={14} /> Download photo</a></div><button className="lightbox-nav lightbox-next" onClick={(event) => { event.stopPropagation(); next(); }} aria-label="Next photo"><ChevronRight size={22} /></button></div>;
+  const close = () => {
+    if (closing) return;
+    setClosing(true);
+    window.setTimeout(onClose, 180);
+  };
+  return <div className={`gallery-lightbox${closing ? " lightbox-closing" : ""}`} role="dialog" aria-modal="true" aria-label="Photo viewer" onClick={close}><button className="lightbox-close" onClick={close} aria-label="Close photo viewer"><X size={20} /></button><button className="lightbox-nav lightbox-prev" onClick={(event) => { event.stopPropagation(); previous(); }} aria-label="Previous photo"><ChevronLeft size={22} /></button><img src={images[active]} alt={`Photo ${active + 1} of ${images.length}`} onClick={(event) => event.stopPropagation()} /><div className="lightbox-controls" onClick={(event) => event.stopPropagation()}><span>{String(active + 1).padStart(2, "0")} / {String(images.length).padStart(2, "0")}</span><a href={images[active]} download={`gather-memory-${active + 1}.jpg`} className="button button-light button-sm"><Download size={14} /> Download photo</a></div><button className="lightbox-nav lightbox-next" onClick={(event) => { event.stopPropagation(); next(); }} aria-label="Next photo"><ChevronRight size={22} /></button></div>;
 }
 
 function RsvpPage() {
@@ -724,8 +756,16 @@ function EventOverviewPage() {
   const { eventId = "" } = useParams();
   const { getEvent, refreshEvent, notify } = usePlatform();
   const navigate = useNavigate();
+  const location = useLocation();
+  const justPublished = typeof location.state === "object" && location.state !== null
+    && "justPublished" in location.state && location.state.justPublished === true;
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    if (!justPublished) return;
+    const timer = window.setTimeout(() => navigate(location.pathname, { replace: true, state: null }), 2600);
+    return () => window.clearTimeout(timer);
+  }, [justPublished, location.pathname, navigate]);
   useEffect(() => {
     let active = true;
     void refreshEvent(eventId).catch((reason) => {
@@ -758,6 +798,7 @@ function EventOverviewPage() {
     }
   };
   return <div className="page-stack">
+    {justPublished && <div className="confetti-burst" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <span key={index} style={{ left: `${(index * 47 + 7) % 100}%`, animationDelay: `${index % 6 * 70}ms`, backgroundColor: `hsl(${(index * 43) % 360} 55% 65%)` }} />)}</div>}
     <div className={`event-overview-hero${event.coverImage ? " has-cover" : ""}`}>{event.coverImage ? <img className="event-overview-cover" src={event.coverImage} alt="" aria-hidden="true" /> : <><div className="event-overview-pattern">✳</div><div className="event-hero-monogram">{event.graduateName.charAt(0)}</div></>}<div className="event-overview-hero-copy"><div className="event-overview-top"><span className="panel-kicker">YOUR CELEBRATION</span><StatusBadge status={event.status} /></div><h1>{event.title}</h1><p>{event.description || "All the details for your special day."}</p><div className="event-hero-meta"><span><CalendarDays size={15} />{formatDate(event.startAt)}</span><span><MapPin size={15} />{event.venue}</span></div><div className="event-overview-actions"><Link to={`/event/${event.slug}`} target="_blank" rel="noopener noreferrer" className="button button-outline button-sm">Preview invitation <ExternalLink size={14} /></Link><button className="button button-dark button-sm" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/event/${event.slug}`).then(() => notify("Invitation link copied."), () => notify("Couldn't copy the link. You can share the invitation directly.", "error")); }}><Copy size={14} /> Copy invitation link</button><button className="button button-outline button-sm" onClick={shareInvitation}><Share2 size={14} /> Share</button></div></div></div>
     <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: String(checked).padStart(2, "0"), label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
     <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest approvals</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} awaiting review.` : "Guest details aren't connected yet."} text="Registration counts come from Gather. Individual guest review will appear when the RSVP management screen is connected." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>

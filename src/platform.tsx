@@ -72,7 +72,35 @@ export interface ActivityNotification {
 
 const STORAGE_KEY = "gather.demo.v1";
 const NOTIFICATIONS_KEY = "gather.notifications.v1";
+const COVER_IMAGES_KEY = "gather.cover-images.v1";
 const DAY = 86_400_000;
+
+function readCoverImages(): Record<string, string> {
+  const raw = localStorage.getItem(COVER_IMAGES_KEY);
+  if (!raw) return {};
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Saved cover images could not be read. Clear this browser's saved cover images and try again.");
+  }
+  return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] =>
+    typeof entry[0] === "string" && typeof entry[1] === "string" && /^data:image\/(?:jpeg|png|webp);base64,/i.test(entry[1])));
+}
+
+function getLocalCoverImage(slug: string) {
+  return slug ? readCoverImages()[slug] : undefined;
+}
+
+function saveLocalCoverImage(slug: string, coverImage?: string) {
+  if (!slug) return;
+  const coverImages = readCoverImages();
+  if (coverImage?.startsWith("data:image/")) coverImages[slug] = coverImage;
+  else delete coverImages[slug];
+  try {
+    localStorage.setItem(COVER_IMAGES_KEY, JSON.stringify(coverImages));
+  } catch (reason) {
+    throw new Error(`The cover image could not be saved in this browser: ${reason instanceof Error ? reason.message : String(reason)}`);
+  }
+}
 
 function initialStore(): DemoStore {
   const date = new Date(Date.now() + 8 * DAY);
@@ -225,6 +253,7 @@ function localDateTime(value: string | null, timeZone: string | null) {
 }
 
 export function eventFromApi(event: ApiEvent): EventRecord {
+  const coverImage = getLocalCoverImage(event.slug) || event.coverImageUrl || undefined;
   return {
     id: event.id,
     slug: event.slug,
@@ -247,7 +276,7 @@ export function eventFromApi(event: ApiEvent): EventRecord {
     personalMessage: event.personalMessage ?? "",
     status: statusFromApi(event.eventStatus),
     accent: "#b18a55",
-    ...(event.coverImageUrl ? { coverImage: event.coverImageUrl } : {}),
+    ...(coverImage ? { coverImage } : {}),
     galleryImages: [],
     registrationCount: event.counts?.registrationCount ?? 0,
     pendingRegistrationCount: event.counts?.pendingRegistrationCount ?? 0,
@@ -256,6 +285,7 @@ export function eventFromApi(event: ApiEvent): EventRecord {
 }
 
 export function publicEventFromApi(event: ApiPublicEvent): EventRecord {
+  const coverImage = getLocalCoverImage(event.slug) || event.coverImageUrl || undefined;
   return {
     id: event.slug,
     slug: event.slug,
@@ -278,7 +308,7 @@ export function publicEventFromApi(event: ApiPublicEvent): EventRecord {
     personalMessage: event.personalMessage ?? "",
     status: "Published",
     accent: "#b18a55",
-    ...(event.coverImageUrl ? { coverImage: event.coverImageUrl } : {}),
+    ...(coverImage ? { coverImage } : {}),
     galleryImages: [],
   };
 }
@@ -352,7 +382,7 @@ function eventToApi(event: EventRecord) {
     venueAddress: event.address || null,
     venueInstructions: event.instructions || null,
     personalMessage: event.personalMessage || null,
-    ...(coverImageUrl ? { coverImageUrl } : {}),
+    coverImageUrl: coverImageUrl ?? null,
     rsvpDeadline: dateToApi(event.rsvpDeadline, event.timezone, true),
     additionalGuestLimit: event.additionalLimit,
     approvalRequired: true,
@@ -400,7 +430,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [authError, setAuthError] = useState("");
   const [eventsLoading, setEventsLoading] = useState(false);
   const [eventsError, setEventsError] = useState("");
-  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "success" | "error"; exiting?: boolean } | null>(null);
   const noticeTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -511,6 +541,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       return mappedEvent;
     },
     saveEvent: async (event) => {
+      saveLocalCoverImage(event.slug, event.coverImage);
       const exists = events.some((item) => item.id === event.id);
       const result = exists
         ? await api.updateEvent(event.id, eventToApi(event))
@@ -600,15 +631,21 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     markAllNotificationsRead: () => setNotifications((current) => current.map((item) => ({ ...item, read: true }))),
     notify: (message, tone = "success") => {
       if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
-      setNotice({ message, tone });
-      noticeTimer.current = window.setTimeout(() => setNotice(null), 3200);
+      setNotice({ message, tone, exiting: false });
+      noticeTimer.current = window.setTimeout(() => {
+        setNotice((current) => current ? { ...current, exiting: true } : null);
+        noticeTimer.current = window.setTimeout(() => {
+          setNotice(null);
+          noticeTimer.current = null;
+        }, 260);
+      }, 2940);
     },
   }), [store, events, notifications, user, authLoading, authError, eventsLoading, eventsError]);
 
   return (
     <PlatformContext.Provider value={value}>
       {children}
-      {notice && <div role="status" className={`toast toast-${notice.tone}`}>{notice.message}</div>}
+      {notice && <div role="status" className={`toast toast-${notice.tone}${notice.exiting ? " toast-exiting" : ""}`}>{notice.message}</div>}
     </PlatformContext.Provider>
   );
 }
