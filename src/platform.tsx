@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api/client";
+import type { ApiEvent, ApiPublicEvent, ApiUser } from "./api/client";
 
-export type EventStatus = "Draft" | "Published" | "Unpublished" | "Archived";
+export type EventStatus = "Draft" | "Published" | "Unpublished" | "Cancelled" | "Completed" | "Archived";
 export type GuestStatus = "Pending" | "Approved" | "Declined";
 
 export interface GalleryImage {
@@ -33,6 +35,9 @@ export interface EventRecord {
   accent: string;
   coverImage?: string;
   galleryImages?: GalleryImage[];
+  registrationCount?: number;
+  pendingRegistrationCount?: number;
+  approvedAttendeeCount?: number;
 }
 
 export interface GuestRecord {
@@ -66,7 +71,6 @@ export interface ActivityNotification {
 }
 
 const STORAGE_KEY = "gather.demo.v1";
-const AUTH_KEY = "gather.demo.auth";
 const NOTIFICATIONS_KEY = "gather.notifications.v1";
 const DAY = 86_400_000;
 
@@ -191,15 +195,189 @@ function readNotifications(): ActivityNotification[] {
   return [];
 }
 
+function statusFromApi(status: ApiEvent["eventStatus"]): EventStatus {
+  switch (status) {
+    case "DRAFT": return "Draft";
+    case "PUBLISHED": return "Published";
+    case "UNPUBLISHED": return "Unpublished";
+    case "CANCELLED": return "Cancelled";
+    case "COMPLETED": return "Completed";
+  }
+}
+
+function localDateTime(value: string | null, timeZone: string | null) {
+  if (!value) return "";
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timeZone ?? undefined,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(new Date(value));
+    const values = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+    return `${values.year}-${values.month}-${values.day}T${values.hour}:${values.minute}`;
+  } catch {
+    return toLocalDateTimeInput(new Date(value));
+  }
+}
+
+export function eventFromApi(event: ApiEvent): EventRecord {
+  return {
+    id: event.id,
+    slug: event.slug,
+    title: event.title,
+    category: event.eventCategory,
+    description: event.description ?? "",
+    graduateName: event.graduateName ?? "",
+    institution: event.institution ?? "",
+    faculty: event.faculty ?? "",
+    department: event.department ?? "",
+    qualification: event.qualification ?? "",
+    startAt: event.eventDate ?? "",
+    endAt: "",
+    timezone: event.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    venue: event.venueName ?? "",
+    address: event.venueAddress ?? "",
+    instructions: event.venueInstructions ?? "",
+    rsvpDeadline: event.rsvpDeadline?.slice(0, 10) ?? "",
+    additionalLimit: event.additionalGuestLimit ?? 0,
+    personalMessage: event.personalMessage ?? "",
+    status: statusFromApi(event.eventStatus),
+    accent: "#b18a55",
+    ...(event.coverImageUrl ? { coverImage: event.coverImageUrl } : {}),
+    galleryImages: [],
+    registrationCount: event.counts?.registrationCount ?? 0,
+    pendingRegistrationCount: event.counts?.pendingRegistrationCount ?? 0,
+    approvedAttendeeCount: event.counts?.approvedAttendeeCount ?? 0,
+  };
+}
+
+export function publicEventFromApi(event: ApiPublicEvent): EventRecord {
+  return {
+    id: event.slug,
+    slug: event.slug,
+    title: event.title,
+    category: event.eventCategory,
+    description: event.description ?? "",
+    graduateName: event.graduateName ?? "",
+    institution: event.institution ?? "",
+    faculty: event.faculty ?? "",
+    department: event.department ?? "",
+    qualification: event.qualification ?? "",
+    startAt: localDateTime(event.eventDate, event.timezone),
+    endAt: "",
+    timezone: event.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+    venue: event.venueName ?? "",
+    address: event.venueAddress ?? "",
+    instructions: event.venueInstructions ?? "",
+    rsvpDeadline: event.rsvpDeadline?.slice(0, 10) ?? "",
+    additionalLimit: event.additionalGuestLimit ?? 0,
+    personalMessage: event.personalMessage ?? "",
+    status: "Published",
+    accent: "#b18a55",
+    ...(event.coverImageUrl ? { coverImage: event.coverImageUrl } : {}),
+    galleryImages: [],
+  };
+}
+
+function dateToApi(value: string, timeZone: string, endOfDay = false) {
+  if (!value) return null;
+  const dateTime = endOfDay && value.length === 10 ? `${value}T23:59:59` : value;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(dateTime);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const targetWallTime = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+  let timestamp = targetWallTime;
+
+  try {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const parts = Object.fromEntries(formatter.formatToParts(new Date(timestamp)).map(({ type, value }) => [type, value]));
+      const representedWallTime = Date.UTC(
+        Number(parts.year),
+        Number(parts.month) - 1,
+        Number(parts.day),
+        Number(parts.hour),
+        Number(parts.minute),
+        Number(parts.second),
+      );
+      const difference = targetWallTime - representedWallTime;
+      timestamp += difference;
+      if (difference === 0) break;
+    }
+  } catch {
+    const date = new Date(dateTime);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
+function eventToApi(event: EventRecord) {
+  let coverImageUrl: string | undefined;
+  if (event.coverImage) {
+    try {
+      const coverUrl = new URL(event.coverImage);
+      if (coverUrl.protocol === "https:" || coverUrl.protocol === "http:") coverImageUrl = coverUrl.toString();
+    } catch {
+      coverImageUrl = undefined;
+    }
+  }
+
+  return {
+    title: event.title,
+    slug: event.slug || undefined,
+    eventCategory: event.category,
+    description: event.description || null,
+    graduateName: event.graduateName || null,
+    institution: event.institution || null,
+    faculty: event.faculty || null,
+    department: event.department || null,
+    qualification: event.qualification || null,
+    eventDate: dateToApi(event.startAt, event.timezone),
+    timezone: event.timezone || null,
+    venueName: event.venue || null,
+    venueAddress: event.address || null,
+    venueInstructions: event.instructions || null,
+    personalMessage: event.personalMessage || null,
+    ...(coverImageUrl ? { coverImageUrl } : {}),
+    rsvpDeadline: dateToApi(event.rsvpDeadline, event.timezone, true),
+    additionalGuestLimit: event.additionalLimit,
+    approvalRequired: true,
+  };
+}
+
 interface PlatformContextValue {
   events: EventRecord[];
   guests: GuestRecord[];
   notifications: ActivityNotification[];
   authenticated: boolean;
-  signIn: () => void;
+  authLoading: boolean;
+  authError: string;
+  user: ApiUser | null;
+  eventsLoading: boolean;
+  eventsError: string;
+  login: (email: string, password: string) => Promise<ApiUser>;
+  register: (firstName: string, lastName: string, email: string, password: string) => Promise<ApiUser>;
   signOut: () => void;
-  saveEvent: (event: EventRecord) => EventRecord;
-  removeEvent: (id: string) => void;
+  refreshEvents: () => Promise<void>;
+  refreshEvent: (id: string) => Promise<EventRecord>;
+  saveEvent: (event: EventRecord) => Promise<EventRecord>;
+  publishEvent: (id: string) => Promise<EventRecord>;
+  unpublishEvent: (id: string) => Promise<EventRecord>;
+  removeEvent: (id: string) => Promise<void>;
   updateGuestStatus: (id: string, status: GuestStatus) => void;
   addGuest: (guest: Omit<GuestRecord, "id" | "submittedAt" | "checkedIn">) => GuestRecord;
   checkIn: (guestId: string, attendeeName: string) => boolean;
@@ -216,7 +394,12 @@ const PlatformContext = createContext<PlatformContextValue | null>(null);
 export function PlatformProvider({ children }: { children: React.ReactNode }) {
   const [store, setStore] = useState<DemoStore>(readStore);
   const [notifications, setNotifications] = useState<ActivityNotification[]>(readNotifications);
-  const [authenticated, setAuthenticated] = useState(() => localStorage.getItem(AUTH_KEY) === "true");
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [user, setUser] = useState<ApiUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState("");
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState("");
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
   const noticeTimer = useRef<number | null>(null);
 
@@ -228,40 +411,133 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem(NOTIFICATIONS_KEY, JSON.stringify(notifications));
   }, [notifications]);
 
+  const refreshEvents = async () => {
+    if (!getAccessToken()) {
+      setEvents([]);
+      return;
+    }
+    setEventsLoading(true);
+    setEventsError("");
+    try {
+      const result = await api.listEvents();
+      const loadedEvents = result.events.map(eventFromApi);
+      setEvents(loadedEvents);
+      setStore((current) => ({ ...current, events: loadedEvents, guests: [] }));
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "Could not load your events.";
+      setEventsError(message);
+      throw reason;
+    } finally {
+      setEventsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    const token = getAccessToken();
+    if (!token) {
+      setAuthLoading(false);
+      return () => { active = false; };
+    }
+
+    void api.me().then(async ({ user: profile }) => {
+      if (!active) return;
+      setUser(profile);
+      setAuthError("");
+      await refreshEvents();
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      if (getAccessToken()) {
+        setAuthError(reason instanceof Error ? reason.message : "Could not verify your session.");
+      } else {
+        setUser(null);
+      }
+    }).finally(() => {
+      if (active) setAuthLoading(false);
+    });
+
+    const handleUnauthorized = () => {
+      if (!active) return;
+      setUser(null);
+      setEvents([]);
+    };
+    window.addEventListener("gather:unauthorized", handleUnauthorized);
+    return () => {
+      active = false;
+      window.removeEventListener("gather:unauthorized", handleUnauthorized);
+    };
+  }, []);
+
   const value = useMemo<PlatformContextValue>(() => ({
-    events: store.events,
-    guests: store.guests,
+    events,
+    guests: store.guests.filter((guest) => events.some((event) => event.id === guest.eventId)),
     notifications,
-    authenticated,
-    signIn: () => {
-      localStorage.setItem(AUTH_KEY, "true");
-      setAuthenticated(true);
+    authenticated: user !== null,
+    authLoading,
+    authError,
+    user,
+    eventsLoading,
+    eventsError,
+    login: async (email, password) => {
+      const result = await api.login({ email, password });
+      setAccessToken(result.token);
+      setUser(result.user);
+      setAuthError("");
+      await refreshEvents().catch(() => undefined);
+      return result.user;
+    },
+    register: async (firstName, lastName, email, password) => {
+      const result = await api.register({ firstName, lastName, email, password });
+      setAccessToken(result.token);
+      setUser(result.user);
+      setAuthError("");
+      await refreshEvents().catch(() => undefined);
+      return result.user;
     },
     signOut: () => {
-      localStorage.removeItem(AUTH_KEY);
-      setAuthenticated(false);
+      clearAccessToken();
+      setUser(null);
+      setEvents([]);
+      setEventsError("");
+      setAuthError("");
     },
-    saveEvent: (event) => {
-      const exists = store.events.some((item) => item.id === event.id);
-      const nextStore = {
-        ...store,
-        events: exists
-          ? store.events.map((item) => item.id === event.id ? event : item)
-          : [event, ...store.events],
-      };
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextStore));
-      } catch {
-        throw new Error("This browser could not save the event. Free up browser storage and try again.");
-      }
-      setStore(nextStore);
-      return event;
+    refreshEvents,
+    refreshEvent: async (id) => {
+      const { event } = await api.getEvent(id);
+      const mappedEvent = eventFromApi(event);
+      setEvents((current) => current.some((item) => item.id === id)
+        ? current.map((item) => item.id === id ? mappedEvent : item)
+        : [mappedEvent, ...current]);
+      return mappedEvent;
     },
-    removeEvent: (id) => setStore((current) => ({
-      ...current,
-      events: current.events.filter((event) => event.id !== id),
-      guests: current.guests.filter((guest) => guest.eventId !== id),
-    })),
+    saveEvent: async (event) => {
+      const exists = events.some((item) => item.id === event.id);
+      const result = exists
+        ? await api.updateEvent(event.id, eventToApi(event))
+        : await api.createEvent(eventToApi(event));
+      const mappedEvent = eventFromApi(result.event);
+      setEvents((current) => current.some((item) => item.id === mappedEvent.id)
+        ? current.map((item) => item.id === mappedEvent.id ? mappedEvent : item)
+        : [mappedEvent, ...current]);
+      return mappedEvent;
+    },
+    publishEvent: async (id) => {
+      const { event } = await api.publishEvent(id);
+      const mappedEvent = eventFromApi(event);
+      setEvents((current) => current.map((item) => item.id === id ? mappedEvent : item));
+      return mappedEvent;
+    },
+    unpublishEvent: async (id) => {
+      const { event } = await api.unpublishEvent(id);
+      const mappedEvent = eventFromApi(event);
+      setEvents((current) => current.map((item) => item.id === id ? mappedEvent : item));
+      return mappedEvent;
+    },
+    removeEvent: async (id) => {
+      await api.deleteEvent(id);
+      setEvents((current) => current.filter((event) => event.id !== id));
+      setStore((current) => ({ ...current, guests: current.guests.filter((guest) => guest.eventId !== id) }));
+    },
     updateGuestStatus: (id, status) => setStore((current) => ({
       ...current,
       guests: current.guests.map((guest) => {
@@ -313,9 +589,9 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }, ...current].slice(0, 50));
       return true;
     },
-    getEvent: (idOrSlug) => store.events.find((event) => event.id === idOrSlug || event.slug === idOrSlug),
+    getEvent: (idOrSlug) => events.find((event) => event.id === idOrSlug || event.slug === idOrSlug),
     getPublishedGallery: (eventId) => {
-      const event = store.events.find((item) => item.id === eventId);
+      const event = events.find((item) => item.id === eventId);
       if (!event || event.status !== "Published") return [];
       return (event.galleryImages || []).filter((image) => image.published).map(({ id, src }) => ({ id, src, published: true }));
     },
@@ -327,7 +603,7 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       setNotice({ message, tone });
       noticeTimer.current = window.setTimeout(() => setNotice(null), 3200);
     },
-  }), [store, notifications, authenticated]);
+  }), [store, events, notifications, user, authLoading, authError, eventsLoading, eventsError]);
 
   return (
     <PlatformContext.Provider value={value}>

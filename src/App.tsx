@@ -11,10 +11,10 @@ import {
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import JSZip from "jszip";
-import { attendeeCount, formatDate, formatTime, getDemoTicketToken, PlatformProvider, slugify, usePlatform } from "./platform";
+import { attendeeCount, formatDate, formatTime, getDemoTicketToken, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
 import type { EventRecord, GalleryImage, GuestRecord, GuestStatus } from "./platform";
+import { api, ApiError } from "./api/client";
 
-const demoEvent = "event-next-chapter";
 const ticketToken = (guest: GuestRecord, attendeeName: string) => getDemoTicketToken(guest, attendeeName);
 const Scanner = lazy(() => import("./Scanner"));
 type Theme = "light" | "dark";
@@ -73,8 +73,14 @@ function App() {
 }
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
-  const { authenticated } = usePlatform();
+  const { authenticated, authLoading, authError } = usePlatform();
   const location = useLocation();
+  if (authLoading) {
+    return <div className="simple-auth"><div className="auth-form-wrap"><LoaderCircle className="spin" size={24} /><p>Checking your Gather account…</p></div></div>;
+  }
+  if (authError) {
+    return <div className="simple-error"><Brand /><div className="error-card"><h1>We couldn't<br /><em>reach Gather.</em></h1><p>{authError}</p><Link to="/login" className="button button-dark">Sign in again <ArrowRight size={16} /></Link></div></div>;
+  }
   return authenticated ? <>{children}</> : <Navigate to="/login" replace state={{ from: location.pathname }} />;
 }
 
@@ -186,29 +192,48 @@ function HomePage() {
 }
 
 function AuthPage({ mode }: { mode: "login" | "signup" }) {
-  const { signIn, notify } = usePlatform();
+  const { login, register, authenticated, authLoading, notify } = usePlatform();
   const navigate = useNavigate();
   const location = useLocation();
   const [showPassword, setShowPassword] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const submit = (event: FormEvent<HTMLFormElement>) => {
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     if (mode === "signup" && data.get("password") !== data.get("confirmPassword")) {
       setError("Those passwords don't match yet.");
       return;
     }
+    if (mode === "signup") {
+      const fullName = String(data.get("name") ?? "").trim().split(/\s+/);
+      if (fullName.length < 2 || fullName.some((part) => part.length < 2)) {
+        setError("Enter your first and last name to create an account.");
+        return;
+      }
+    }
     setError("");
     setBusy(true);
-    window.setTimeout(() => {
-      signIn();
+    try {
+      if (mode === "signup") {
+        const [firstName, ...lastName] = String(data.get("name")).trim().split(/\s+/);
+        await register(firstName, lastName.join(" "), String(data.get("email")), String(data.get("password")));
+      } else {
+        await login(String(data.get("email")), String(data.get("password")));
+      }
       notify(mode === "signup" ? "Your account is ready." : "Welcome back. You're signed in.");
       const state = location.state as { from?: string } | null;
       navigate(state?.from || "/dashboard");
+    } catch (reason) {
+      const validationDetails = reason instanceof ApiError
+        ? reason.details?.map((detail) => detail.message).filter(Boolean).join(" ")
+        : "";
+      setError(validationDetails || (reason instanceof Error ? reason.message : "We couldn't sign you in. Please try again."));
+    } finally {
       setBusy(false);
-    }, 350);
+    }
   };
+  if (authenticated && !authLoading) return <Navigate to="/dashboard" replace />;
   return (
     <div className="auth-page">
       <div className="auth-left"><div className="auth-back"><Brand /><Link to="/">Back to home <ArrowUpRight size={14} /></Link></div><div className="auth-form-wrap">
@@ -224,7 +249,7 @@ function AuthPage({ mode }: { mode: "login" | "signup" }) {
           <button type="submit" className="button button-dark button-full button-large" disabled={busy}>{busy ? <><LoaderCircle className="spin" size={17} /> Just a moment…</> : <>{mode === "login" ? "Sign in" : "Create my account"} <ArrowRight size={16} /></>}</button>
         </form>
         <div className="auth-switch">{mode === "login" ? "New around here?" : "Already have an account?"} <Link to={mode === "login" ? "/signup" : "/login"}>{mode === "login" ? "Create an account" : "Sign in"}</Link></div>
-        <div className="demo-auth-note"><ShieldCheck size={15} /><span>Sign-in is stored in this browser; secure accounts need a connected authentication service.</span></div>
+        <div className="demo-auth-note"><ShieldCheck size={15} /><span>Your account is securely verified by Gather before you continue.</span></div>
       </div><div className="auth-foot"><span>Thoughtfully made for your milestone.</span><span>© 2026 Gather</span></div></div>
       <aside className="auth-visual"><div className="auth-visual-top"><span>YOUR DAY, BEAUTIFULLY GATHERED</span><span>✳</span></div><div className="auth-visual-card"><div className="auth-visual-monogram">A</div><span className="preview-kicker">A NEW CHAPTER BEGINS</span><h2>This is what<br /><em>you worked for.</em></h2><div className="auth-visual-rule" /><p>Good people. A full heart.<br />A moment worth remembering.</p><span className="preview-kicker">NOVEMBER 14 · LAGOS</span></div><div className="auth-visual-bottom"><span>01 / 06</span><span>MADE FOR YOUR MOMENT</span></div></aside>
     </div>
@@ -276,7 +301,7 @@ function ResetPasswordPage() {
 }
 
 function DashboardLayout() {
-  const { events, guests, signOut } = usePlatform();
+  const { events, guests, signOut, user } = usePlatform();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -285,6 +310,8 @@ function DashboardLayout() {
   const activeEvent = events.find((event) => event.id === eventId) || events[0];
   const base = activeEvent ? `/dashboard/events/${activeEvent.id}` : "/dashboard/events";
   const pendingCount = activeEvent ? guests.filter((guest) => guest.eventId === activeEvent.id && guest.status === "Pending").length : 0;
+  const displayName = user ? `${user.firstName} ${user.lastName}` : "Gather";
+  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "G";
   const mainItems = [
     { to: "/dashboard", label: "Overview", icon: LayoutDashboard },
     { to: "/dashboard/events", label: "My events", icon: CalendarDays },
@@ -305,7 +332,7 @@ function DashboardLayout() {
     <div className="dashboard-app">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="sidebar-brand"><Brand /></div>
-        <div className="workspace-switch"><span className="workspace-avatar">A</span><span><b>Amara's workspace</b><small>Personal account</small></span><ChevronDown size={15} /></div>
+        <div className="workspace-switch"><span className="workspace-avatar">{initials[0]}</span><span><b>{displayName}'s workspace</b><small>Personal account</small></span><ChevronDown size={15} /></div>
         <nav className="side-nav" aria-label="Dashboard navigation">
           <span className="nav-section-label">WORKSPACE</span>
           {mainItems.map((item) => <SideLink key={item.to} {...item} active={location.pathname === item.to || (item.to === "/dashboard/events" && location.pathname === item.to)} />)}
@@ -315,11 +342,11 @@ function DashboardLayout() {
           <div className="nav-divider" /><span className="nav-section-label">ACCOUNT</span>
           {accountItems.map((item) => <SideLink key={item.to} {...item} active={location.pathname === item.to} />)}
         </nav>
-        <div className="sidebar-bottom"><div className="help-card"><div className="help-card-icon"><CircleHelp size={17} /></div><b>Need a hand?</b><span>We're here to help you make it special.</span><a href="mailto:hello@gather.example">Get in touch <ArrowUpRight size={13} /></a></div><button className="side-link logout-link" onClick={() => { signOut(); navigate("/"); }}><LogOut size={17} /> <span>Sign out</span></button><div className="sidebar-profile"><span className="profile-avatar">AO</span><span><b>Amara Okafor</b><small>Free plan</small></span><MoreHorizontal size={18} /></div></div>
+        <div className="sidebar-bottom"><div className="help-card"><div className="help-card-icon"><CircleHelp size={17} /></div><b>Need a hand?</b><span>We're here to help you make it special.</span><a href="mailto:hello@gather.example">Get in touch <ArrowUpRight size={13} /></a></div><button className="side-link logout-link" onClick={() => { signOut(); navigate("/"); }}><LogOut size={17} /> <span>Sign out</span></button><div className="sidebar-profile"><span className="profile-avatar">{initials}</span><span><b>{displayName}</b><small>{user?.email}</small></span><MoreHorizontal size={18} /></div></div>
       </aside>
       {menuOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
       <div className="dashboard-main">
-        <header className="dashboard-topbar"><button className="mobile-menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Open menu"><Menu size={21} /></button><div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><b>{currentLabel}</b></div><div className="topbar-actions"><NotificationCenter /><button className="icon-button theme-toggle" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`} title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}</button><span className="topbar-avatar">AO</span></div></header>
+        <header className="dashboard-topbar"><button className="mobile-menu-button" onClick={() => setMenuOpen(!menuOpen)} aria-label="Open menu"><Menu size={21} /></button><div className="breadcrumbs"><span>Workspace</span><ChevronRight size={14} /><b>{currentLabel}</b></div><div className="topbar-actions"><NotificationCenter /><button className="icon-button theme-toggle" onClick={() => setTheme(theme === "light" ? "dark" : "light")} aria-label={`Switch to ${theme === "light" ? "dark" : "light"} theme`} title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>{theme === "light" ? <Moon size={18} /> : <Sun size={18} />}</button><span className="topbar-avatar">{initials}</span></div></header>
         <div className="dashboard-content"><Outlet /></div>
       </div>
     </div>
@@ -335,34 +362,30 @@ function PageTitle({ eyebrow, title, description, action }: { eyebrow?: string; 
 }
 
 function DashboardPage() {
-  const { events, guests } = usePlatform();
+  const { events, user, eventsLoading, eventsError, refreshEvents } = usePlatform();
   const navigate = useNavigate();
-  const totalRSVP = guests.length;
-  const approved = guests.filter((guest) => guest.status === "Approved" && guest.attending).reduce((sum, guest) => sum + attendeeCount(guest), 0);
-  const checkedIn = guests.reduce((sum, guest) => sum + guest.checkedIn.length, 0);
-  const stats = [{ label: "Your events", value: String(events.length).padStart(2, "0"), change: "All in one place", icon: CalendarDays, tone: "sand" }, { label: "RSVPs received", value: String(totalRSVP).padStart(2, "0"), change: `${guests.filter((guest) => guest.status === "Pending").length} waiting for you`, icon: Users, tone: "lilac" }, { label: "Guests approved", value: String(approved).padStart(2, "0"), change: "Across all your events", icon: CheckCircle2, tone: "mint" }, { label: "Checked in", value: String(checkedIn).padStart(2, "0"), change: "For your celebrations", icon: QrCode, tone: "rose" }];
+  const totalRSVP = events.reduce((sum, event) => sum + (event.registrationCount ?? 0), 0);
+  const pending = events.reduce((sum, event) => sum + (event.pendingRegistrationCount ?? 0), 0);
+  const approved = events.reduce((sum, event) => sum + (event.approvedAttendeeCount ?? 0), 0);
+  const stats = [{ label: "Your events", value: String(events.length).padStart(2, "0"), change: "All in one place", icon: CalendarDays, tone: "sand" }, { label: "RSVPs received", value: String(totalRSVP).padStart(2, "0"), change: `${pending} waiting for you`, icon: Users, tone: "lilac" }, { label: "Guests approved", value: String(approved).padStart(2, "0"), change: "Across all your events", icon: CheckCircle2, tone: "mint" }, { label: "Checked in", value: "00", change: "Check-in is not connected yet", icon: QrCode, tone: "rose" }];
   const latest = [...events].sort((a, b) => b.startAt.localeCompare(a.startAt)).slice(0, 3);
   const upcoming = events[0];
   const daysUntilEvent = upcoming ? Math.max(0, Math.ceil((new Date(upcoming.startAt).getTime() - Date.now()) / 86_400_000)) : 0;
   const greeting = new Date().getHours() < 12 ? "Good morning" : new Date().getHours() < 18 ? "Good afternoon" : "Good evening";
   const todayLabel = new Intl.DateTimeFormat("en", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date()).toUpperCase();
   return <div className="page-stack">
-    <div className="welcome-strip"><div><span className="welcome-overline">{todayLabel}</span><h1>{greeting}, Amara <span>✳</span></h1><p>Your big day is coming together beautifully.</p></div><Link className="button button-dark" to="/dashboard/events/create"><Plus size={16} /> Create an event</Link></div>
+    <div className="welcome-strip"><div><span className="welcome-overline">{todayLabel}</span><h1>{greeting}, {user?.firstName || "there"} <span>✳</span></h1><p>Your big day is coming together beautifully.</p></div><Link className="button button-dark" to="/dashboard/events/create"><Plus size={16} /> Create an event</Link></div>
     <div className="stats-grid">{stats.map(({ label, value, change, icon: Icon, tone }) => <article className="stat-card" key={label}><div className={`stat-icon ${tone}`}><Icon size={18} /></div><span className="stat-label">{label}</span><div className="stat-bottom"><strong>{value}</strong><span>{change}</span></div></article>)}</div>
-    <div className="dashboard-columns"><section className="panel events-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR CELEBRATIONS</span><h2>Recent events</h2></div><Link className="subtle-link" to="/dashboard/events">See all <ArrowRight size={15} /></Link></div>{latest.length ? <div className="recent-event-list">{latest.map((event) => <EventRow key={event.id} event={event} onClick={() => navigate(`/dashboard/events/${event.id}`)} />)}</div> : <EmptyState icon={<CalendarDays size={23} />} title="Your first celebration is waiting." text="Create an event and make an invitation your guests will love." action={<Link className="button button-dark" to="/dashboard/events/create"><Plus size={15} /> Create an event</Link>} />}</section>
-      <section className="panel activity-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE UPDATE</span><h2>Recent activity</h2></div><button className="icon-button" aria-label="More activity"><MoreHorizontal size={18} /></button></div><div className="activity-list"><Activity icon={<Users size={15} />} title="New RSVP from Dara Adebayo" detail="The Next Chapter · 1 day ago" tone="blue" /><Activity icon={<Check size={15} />} title="Zainab Bello was approved" detail="The Next Chapter · 3 days ago" tone="green" /><Activity icon={<QrCode size={15} />} title="A guest checked in" detail="The Next Chapter · 4 days ago" tone="gold" /></div><Link className="activity-footer" to={`/dashboard/events/${events[0]?.id || demoEvent}/guests`}>View all guest activity <ArrowRight size={14} /></Link></section></div>
-    <section className="upcoming-banner"><div className="upcoming-text"><span className="panel-kicker">COMING UP NEXT</span><h2>{upcoming?.title || "Your next event"}</h2><p><CalendarDays size={15} /> {upcoming ? formatDate(upcoming.startAt) : "Add a date to your event"} <span className="bullet-separator">·</span> <MapPin size={15} /> {upcoming?.venue || "Add a venue"}</p><Link className="text-link" to={`/dashboard/events/${upcoming?.id || demoEvent}`}>Open event dashboard <ArrowRight size={15} /></Link></div><div className="upcoming-art"><span>✳</span><div className="upcoming-count"><b>{upcoming ? String(daysUntilEvent).padStart(2, "0") : "—"}</b><small>{upcoming ? daysUntilEvent === 0 ? "EVENT DAY" : "DAYS TO GO" : "ADD YOUR DATE"}</small></div></div></section>
+    {eventsError && <div className="inline-error" role="alert">{eventsError}<button className="subtle-link" onClick={() => void refreshEvents().catch(() => undefined)}>Try again</button></div>}
+    {eventsLoading && !events.length && <div className="empty-state"><LoaderCircle className="spin" size={22} /> Loading your events…</div>}
+    <div className="dashboard-columns"><section className="panel events-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR CELEBRATIONS</span><h2>Recent events</h2></div><Link className="subtle-link" to="/dashboard/events">See all <ArrowRight size={15} /></Link></div>{latest.length ? <div className="recent-event-list">{latest.map((event) => <EventRow key={event.id} event={event} onClick={() => navigate(`/dashboard/events/${event.id}`)} />)}</div> : !eventsLoading && <EmptyState icon={<CalendarDays size={23} />} title="Your first celebration is waiting." text="Create an event and make an invitation your guests will love." action={<Link className="button button-dark" to="/dashboard/events/create"><Plus size={15} /> Create an event</Link>} />}</section>
+      <section className="panel activity-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE UPDATE</span><h2>Recent activity</h2></div></div><EmptyState icon={<Users size={22} />} title="Guest activity isn't connected yet." text="Your events and RSVP totals are loaded from Gather. Guest approvals and check-in need their API workflows." /></section></div>
+    <section className="upcoming-banner"><div className="upcoming-text"><span className="panel-kicker">COMING UP NEXT</span><h2>{upcoming?.title || "Your next event"}</h2><p><CalendarDays size={15} /> {upcoming ? formatDate(upcoming.startAt) : "Add a date to your event"} <span className="bullet-separator">·</span> <MapPin size={15} /> {upcoming?.venue || "Add a venue"}</p>{upcoming && <Link className="text-link" to={`/dashboard/events/${upcoming.id}`}>Open event dashboard <ArrowRight size={15} /></Link>}</div><div className="upcoming-art"><span>✳</span><div className="upcoming-count"><b>{upcoming ? String(daysUntilEvent).padStart(2, "0") : "—"}</b><small>{upcoming ? daysUntilEvent === 0 ? "EVENT DAY" : "DAYS TO GO" : "ADD YOUR DATE"}</small></div></div></section>
   </div>;
 }
 
-function Activity({ icon, title, detail, tone }: { icon: React.ReactNode; title: string; detail: string; tone: string }) {
-  return <div className="activity-item"><span className={`activity-icon ${tone}`}>{icon}</span><span><b>{title}</b><small>{detail}</small></span></div>;
-}
-
 function EventRow({ event, onClick }: { event: EventRecord; onClick: () => void }) {
-  const { getGuests } = usePlatform();
-  const guests = getGuests(event.id);
-  return <button className="recent-event-row" onClick={onClick}><div className={`event-thumb ${event.status === "Published" ? "thumb-published" : "thumb-draft"}`}><span>{event.graduateName?.slice(0, 1) || "G"}</span><i>✳</i></div><span className="event-row-main"><b>{event.title || "Untitled event"}</b><small>{formatDate(event.startAt, { day: "numeric", month: "short", year: "numeric" })}<span>·</span>{event.venue || "Venue to be confirmed"}</small></span><span className="event-row-count"><b>{guests.length}</b><small>RSVPs</small></span><StatusBadge status={event.status} /><ArrowRight size={16} className="row-arrow" /></button>;
+  return <button className="recent-event-row" onClick={onClick}><div className={`event-thumb ${event.status === "Published" ? "thumb-published" : "thumb-draft"}`}><span>{event.graduateName?.slice(0, 1) || "G"}</span><i>✳</i></div><span className="event-row-main"><b>{event.title || "Untitled event"}</b><small>{formatDate(event.startAt, { day: "numeric", month: "short", year: "numeric" })}<span>·</span>{event.venue || "Venue to be confirmed"}</small></span><span className="event-row-count"><b>{event.registrationCount ?? 0}</b><small>RSVPs</small></span><StatusBadge status={event.status} /><ArrowRight size={16} className="row-arrow" /></button>;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -375,26 +398,40 @@ function EmptyState({ icon, title, text, action }: { icon: React.ReactNode; titl
 }
 
 function EventsPage() {
-  const { events, getGuests, saveEvent, removeEvent, notify } = usePlatform();
+  const { events, publishEvent, unpublishEvent, removeEvent, notify, eventsLoading, eventsError, refreshEvents } = usePlatform();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("All events");
   const navigate = useNavigate();
   const filtered = events.filter((event) => (filter === "All events" || event.status === filter) && `${event.title} ${event.category}`.toLowerCase().includes(query.toLowerCase()));
-  const togglePublish = (event: EventRecord) => {
-    const status = event.status === "Published" ? "Unpublished" : "Published";
-    saveEvent({ ...event, status });
-    notify(status === "Published" ? "Your invitation is live." : "Your invitation has been unpublished.");
+  const togglePublish = async (event: EventRecord) => {
+    try {
+      if (event.status === "Published") {
+        await unpublishEvent(event.id);
+        notify("Your invitation has been unpublished.");
+      } else {
+        await publishEvent(event.id);
+        notify("Your invitation is live.");
+      }
+    } catch (reason) {
+      notify(reason instanceof Error ? reason.message : "The event status could not be changed.", "error");
+    }
   };
-  const deleteEvent = (event: EventRecord) => {
-    if (window.confirm(`Delete “${event.title}” and its guest list?`)) {
-      removeEvent(event.id);
-      notify("Event removed.");
+  const deleteEvent = async (event: EventRecord) => {
+    if (window.confirm(`Remove “${event.title}” from your events? Its records will be preserved.`)) {
+      try {
+        await removeEvent(event.id);
+        notify("Event removed from your active events.");
+      } catch (reason) {
+        notify(reason instanceof Error ? reason.message : "The event could not be removed.", "error");
+      }
     }
   };
   return <div className="page-stack">
     <PageTitle eyebrow="A PLACE FOR EVERY MILESTONE" title="My events" description="Every celebration, all in one place." action={<Link className="button button-dark" to="/dashboard/events/create"><Plus size={16} /> Create event</Link>} />
-    <div className="list-toolbar"><div className="search-field"><Search size={17} /><input placeholder="Search your events…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search events" /></div><div className="filter-wrap"><Filter size={15} /><select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter by status"><option>All events</option><option>Published</option><option>Draft</option><option>Unpublished</option><option>Archived</option></select><ChevronDown size={14} /></div><span className="result-count">{filtered.length} {filtered.length === 1 ? "event" : "events"}</span></div>
-    {filtered.length ? <div className="events-grid">{filtered.map((event) => <article className="event-card" key={event.id}><button className={`event-card-cover ${event.status === "Published" ? "cover-olive" : "cover-rose"}`} style={event.coverImage ? { backgroundImage: `linear-gradient(rgba(40,43,37,.25),rgba(40,43,37,.25)),url(${event.coverImage})`, backgroundPosition: "center", backgroundSize: "cover" } : undefined} onClick={() => navigate(`/dashboard/events/${event.id}`)} aria-label={`View ${event.title}`}><span className="cover-ornament">✳</span><span className="cover-title">{event.graduateName.split(" ").map((word) => word[0]).join("")}</span><span className="cover-date">{formatDate(event.startAt, { day: "numeric", month: "short" }).toUpperCase()}</span></button><div className="event-card-body"><div className="event-card-title"><div><span className="event-category">{event.category || "CELEBRATION"}</span><h3>{event.title || "Untitled event"}</h3></div><button className="icon-button" aria-label={`More actions for ${event.title}`} onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><MoreHorizontal size={18} /></button></div><div className="event-meta"><span><CalendarDays size={14} />{formatDate(event.startAt, { day: "numeric", month: "short", year: "numeric" })}</span><span><MapPin size={14} />{event.venue || "Venue to be confirmed"}</span></div><div className="event-card-stats"><span><b>{getGuests(event.id).length}</b> RSVPs</span><span><b>{getGuests(event.id).filter((guest) => guest.status === "Approved").reduce((n, guest) => n + attendeeCount(guest), 0)}</b> guests approved</span><StatusBadge status={event.status} /></div><div className="event-card-actions"><Link className="button button-outline button-sm" to={`/dashboard/events/${event.id}`}>Manage event</Link><button className="icon-button" title={event.status === "Published" ? "Unpublish" : "Publish"} aria-label={event.status === "Published" ? "Unpublish event" : "Publish event"} onClick={() => togglePublish(event)}><Share2 size={16} /></button><button className="icon-button danger-icon" title="Delete event" aria-label="Delete event" onClick={() => deleteEvent(event)}><Trash2 size={16} /></button></div></div></article>)}</div> : <EmptyState icon={<CalendarDays size={24} />} title={query || filter !== "All events" ? "Nothing here just yet." : "Your first celebration is waiting."} text={query || filter !== "All events" ? "Try changing the search or status filter." : "Create an event and bring your favourite people together."} action={!events.length ? <Link className="button button-dark" to="/dashboard/events/create"><Plus size={15} /> Create your first event</Link> : undefined} />}
+    <div className="list-toolbar"><div className="search-field"><Search size={17} /><input placeholder="Search your events…" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search events" /></div><div className="filter-wrap"><Filter size={15} /><select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter by status"><option>All events</option><option>Published</option><option>Draft</option><option>Unpublished</option><option>Cancelled</option><option>Completed</option></select><ChevronDown size={14} /></div><span className="result-count">{filtered.length} {filtered.length === 1 ? "event" : "events"}</span></div>
+    {eventsError && <div className="inline-error" role="alert">{eventsError}<button className="subtle-link" onClick={() => void refreshEvents().catch(() => undefined)}>Try again</button></div>}
+    {eventsLoading && <div className="empty-state"><LoaderCircle className="spin" size={22} /> Loading your events…</div>}
+    {!eventsLoading && (filtered.length ? <div className="events-grid">{filtered.map((event) => <article className="event-card" key={event.id}><button className={`event-card-cover ${event.status === "Published" ? "cover-olive" : "cover-rose"}`} style={event.coverImage ? { backgroundImage: `linear-gradient(rgba(40,43,37,.25),rgba(40,43,37,.25)),url(${event.coverImage})`, backgroundPosition: "center", backgroundSize: "cover" } : undefined} onClick={() => navigate(`/dashboard/events/${event.id}`)} aria-label={`View ${event.title}`}><span className="cover-ornament">✳</span><span className="cover-title">{event.graduateName.split(" ").map((word) => word[0]).join("")}</span><span className="cover-date">{formatDate(event.startAt, { day: "numeric", month: "short" }).toUpperCase()}</span></button><div className="event-card-body"><div className="event-card-title"><div><span className="event-category">{event.category || "CELEBRATION"}</span><h3>{event.title || "Untitled event"}</h3></div><button className="icon-button" aria-label={`More actions for ${event.title}`} onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><MoreHorizontal size={18} /></button></div><div className="event-meta"><span><CalendarDays size={14} />{formatDate(event.startAt, { day: "numeric", month: "short", year: "numeric" })}</span><span><MapPin size={14} />{event.venue || "Venue to be confirmed"}</span></div><div className="event-card-stats"><span><b>{event.registrationCount ?? 0}</b> RSVPs</span><span><b>{event.approvedAttendeeCount ?? 0}</b> guests approved</span><StatusBadge status={event.status} /></div><div className="event-card-actions"><Link className="button button-outline button-sm" to={`/dashboard/events/${event.id}`}>Manage event</Link><button className="icon-button" title={event.status === "Published" ? "Unpublish" : "Publish"} aria-label={event.status === "Published" ? "Unpublish event" : "Publish event"} onClick={() => void togglePublish(event)} disabled={event.status === "Cancelled" || event.status === "Completed"}><Share2 size={16} /></button><button className="icon-button danger-icon" title="Delete event" aria-label={`Remove ${event.title}`} onClick={() => void deleteEvent(event)}><Trash2 size={16} /></button></div></div></article>)}</div> : <EmptyState icon={<CalendarDays size={24} />} title={query || filter !== "All events" ? "Nothing here just yet." : "Your first celebration is waiting."} text={query || filter !== "All events" ? "Try changing the search or status filter." : "Create an event and bring your favourite people together."} action={!events.length ? <Link className="button button-dark" to="/dashboard/events/create"><Plus size={15} /> Create your first event</Link> : undefined} />)}
   </div>;
 }
 
@@ -403,12 +440,14 @@ const wizardLabels = ["The basics", "Your story", "When & where", "Guest list", 
 
 function EventWizard() {
   const { eventId } = useParams();
-  const { events, getEvent, saveEvent, notify } = usePlatform();
+  const { getEvent, saveEvent, publishEvent, refreshEvent, notify } = usePlatform();
   const existing = eventId ? getEvent(eventId) : undefined;
   const navigate = useNavigate();
   const [step, setStep] = useState(0);
   const [error, setError] = useState("");
   const [imageProgress, setImageProgress] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadingEvent, setLoadingEvent] = useState(Boolean(eventId));
   const [form, setForm] = useState<EventRecord>(() => existing || ({
     id: `event-${crypto.randomUUID()}`, slug: "", title: "", category: "", description: "",
     graduateName: "Amara Okafor", institution: "", faculty: "", department: "", qualification: "",
@@ -416,6 +455,22 @@ function EventWizard() {
     venue: "", address: "", instructions: "", rsvpDeadline: "", additionalLimit: 1,
     personalMessage: "", status: "Draft", accent: "#b18a55",
   }));
+  useEffect(() => {
+    if (!eventId) {
+      setLoadingEvent(false);
+      return;
+    }
+    let active = true;
+    setLoadingEvent(true);
+    void refreshEvent(eventId).then((loadedEvent) => {
+      if (active) setForm(loadedEvent);
+    }).catch((reason) => {
+      if (active) setError(reason instanceof Error ? reason.message : "The event could not be loaded.");
+    }).finally(() => {
+      if (active) setLoadingEvent(false);
+    });
+    return () => { active = false; };
+  }, [eventId]);
   const set = (key: keyof EventRecord, value: string | number) => setForm((current) => ({ ...current, [key]: value }));
   const validateStep = () => {
     if (step === 0 && (!form.title.trim() || !form.category)) return "Add an event title and choose a celebration type to continue.";
@@ -432,21 +487,22 @@ function EventWizard() {
     setError("");
     setStep((current) => Math.min(current + 1, wizardLabels.length - 1));
   };
-  const persist = (publish: boolean) => {
-    const baseSlug = form.slug || slugify(form.title) || `celebration-${Date.now()}`;
-    let slug = baseSlug;
-    let suffix = 2;
-    while (events.some((event) => event.slug === slug && event.id !== form.id)) {
-      slug = `${baseSlug}-${suffix}`;
-      suffix += 1;
-    }
-    const saved = { ...form, slug, status: publish ? "Published" as const : "Draft" as const };
+  const persist = async (publish: boolean) => {
+    setSaving(true);
+    setError("");
     try {
-      saveEvent(saved);
-      notify(publish ? "Your invitation is live. Share it with your people." : "Your event has been saved as a draft.");
+      const saved = await saveEvent({ ...form, slug: form.slug || slugify(form.title) });
+      if (publish && saved.status !== "Published") {
+        await publishEvent(saved.id);
+      }
+      notify(publish
+        ? "Your invitation is live. Share it with your people."
+        : saved.status === "Published" ? "Your event updates have been saved." : "Your event has been saved as a draft.");
       navigate(`/dashboard/events/${saved.id}`);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
     }
   };
   const handleImage = async (file?: File) => {
@@ -466,8 +522,9 @@ function EventWizard() {
       setImageProgress(null);
     }
   };
+  if (loadingEvent) return <div className="empty-state"><LoaderCircle className="spin" size={22} /> Loading event details…</div>;
   return <div className="page-stack wizard-page">
-    <div className="wizard-topline"><Link to="/dashboard/events" className="back-link"><ArrowLeft size={15} /> All events</Link><span className="draft-save-indicator"><i /> Draft saved in this browser</span></div>
+    <div className="wizard-topline"><Link to="/dashboard/events" className="back-link"><ArrowLeft size={15} /> All events</Link><span className="draft-save-indicator"><i /> Changes save to Gather</span></div>
     <div className="wizard-heading"><div><div className="eyebrow"><span className="eyebrow-line" /> {existing ? "MAKE A FEW CHANGES" : "A NEW CELEBRATION"}</div><h1>{existing ? "Edit your event" : "Let's make it yours."}</h1><p>Thoughtful details make the best invitations. You can always come back to these.</p></div><span className="step-counter">0{step + 1} <i>/</i> 06</span></div>
     <div className="wizard-progress">{wizardLabels.map((label, index) => <button type="button" className={`wizard-step ${index === step ? "current" : ""} ${index < step ? "complete" : ""}`} key={label} onClick={() => index < step && setStep(index)} disabled={index > step}><span className="wizard-step-dot">{index < step ? <Check size={13} /> : `0${index + 1}`}</span><span>{label}</span></button>)}</div>
     <div className="wizard-layout"><div className="wizard-form panel">
@@ -478,8 +535,8 @@ function EventWizard() {
       {step === 3 && <div className="form-grid"><div className="field field-span"><label htmlFor="rsvpDeadline">Please reply by <span className="required-star">*</span></label><input id="rsvpDeadline" type="date" value={form.rsvpDeadline} onChange={(e) => set("rsvpDeadline", e.target.value)} /></div><div className="field field-span"><label htmlFor="additionalLimit">Additional guests per invitation</label><div className="limit-select"><button type="button" onClick={() => set("additionalLimit", Math.max(0, form.additionalLimit - 1))} aria-label="Remove one additional guest">−</button><span><b>{form.additionalLimit}</b><small>extra {form.additionalLimit === 1 ? "guest" : "guests"} allowed</small></span><button type="button" onClick={() => set("additionalLimit", Math.min(3, form.additionalLimit + 1))} aria-label="Add one additional guest">+</button></div><span className="field-foot">Your guests can bring themselves plus up to {form.additionalLimit} additional people.</span></div><div className="approval-note"><ShieldCheck size={17} /><span><b>You'll review every RSVP.</b><small>Guests get their tickets after you approve their group.</small></span></div></div>}
       {step === 4 && <div className="form-grid"><div className="field field-span"><label htmlFor="personalMessage">A personal note for your guests</label><textarea id="personalMessage" rows={4} value={form.personalMessage} onChange={(e) => set("personalMessage", e.target.value)} placeholder="I couldn't have made it here without the people I love…" /><span className="field-foot">A few words from you make it feel extra special.</span></div><div className="field field-span"><label>Cover image <span className="optional-label">OPTIONAL</span></label>{form.coverImage ? <div className="upload-preview" style={{ backgroundImage: `url(${form.coverImage})` }}><button type="button" onClick={() => setForm((current) => ({ ...current, coverImage: "" }))} aria-label="Remove cover image"><X size={15} /></button></div> : <label className="upload-zone"><ImagePlus size={22} /><b>{imageProgress === null ? "Choose a cover image" : "Preparing your image…"}</b><span>{imageProgress === null ? "JPG or PNG · up to 1.5 MB" : `${imageProgress}% ready`}</span><input type="file" accept="image/*" disabled={imageProgress !== null} onChange={(e) => handleImage(e.target.files?.[0])} /></label>}</div><div className="field field-span"><PhotoGalleryEditor photos={form.galleryImages || []} onChange={(galleryImages) => setForm((current) => ({ ...current, galleryImages }))} /><span className="field-foot">Only photos you mark as published appear on your public invitation.</span></div><div className="field field-span"><label>Invitation accent</label><div className="accent-picker">{["#b18a55", "#71826b", "#9d7580", "#64748b", "#292d28"].map((color) => <button type="button" key={color} style={{ background: color }} className={form.accent === color ? "accent-selected" : ""} onClick={() => set("accent", color)} aria-label={`Choose accent ${color}`} />)}<span>Keep it warm, or choose a shade that feels like you.</span></div></div></div>}
       {step === 5 && <InvitationMiniPreview event={form} />}
-      {error && <div className="inline-error wizard-error"><XCircle size={16} />{error}</div>}
-      <div className="wizard-footer"><button className="button button-outline" onClick={() => step === 0 ? navigate("/dashboard/events") : setStep((current) => current - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" onClick={() => persist(false)}>Save as draft</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" onClick={() => persist(true)}><Sparkles size={15} /> Publish event</button>}</div></div>
+      {error && <div className="inline-error wizard-error" role="alert"><XCircle size={16} />{error}</div>}
+      <div className="wizard-footer"><button className="button button-outline" disabled={saving} onClick={() => step === 0 ? navigate("/dashboard/events") : setStep((current) => current - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" disabled={saving} onClick={() => void persist(false)}>{saving ? "Saving…" : "Save as draft"}</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" disabled={saving} onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" disabled={saving} onClick={() => void persist(true)}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <><Sparkles size={15} /> Publish event</>}</button>}</div></div>
     </div><aside className="wizard-aside"><div className="wizard-aside-art"><span>✳</span><div className="aside-mini-card"><small>YOU'RE INVITED</small><b>{form.title || "Your celebration"}</b><i>{form.graduateName}</i><span className="aside-mini-line" /><small>{form.startAt ? formatDate(form.startAt, { day: "numeric", month: "long", year: "numeric" }).toUpperCase() : "YOUR SPECIAL DAY"} · LAGOS</small></div></div><div className="wizard-tip"><Sparkles size={16} /><span><b>A little note</b><small>You can edit everything later. Your invitation isn't shared until you publish it.</small></span></div><div className="wizard-help"><CircleHelp size={16} /><span>Need inspiration?</span><a href="#preview" onClick={(event) => { event.preventDefault(); setStep(5); }}>See your invitation preview</a></div></aside></div>
   </div>;
 }
@@ -490,15 +547,39 @@ function InvitationMiniPreview({ event }: { event: EventRecord }) {
 
 function PublicEventPage() {
   const { slug = "" } = useParams();
-  const { getEvent, getPublishedGallery } = usePlatform();
-  const event = getEvent(slug);
-  if (!event || event.status !== "Published") return <UnavailablePage />;
+  const { getPublishedGallery } = usePlatform();
+  const [event, setEvent] = useState<EventRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notFound, setNotFound] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError("");
+    setNotFound(false);
+    void api.publicEvent(slug).then(({ event: publicEvent }) => {
+      if (active) setEvent(publicEventFromApi(publicEvent));
+    }).catch((reason) => {
+      if (!active) return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        setNotFound(true);
+      } else {
+        setError(reason instanceof Error ? reason.message : "The invitation could not be loaded.");
+      }
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [slug]);
+  if (loading) return <div className="simple-auth"><div className="auth-form-wrap"><LoaderCircle className="spin" size={24} /><p>Opening your invitation…</p></div></div>;
+  if (notFound) return <UnavailablePage />;
+  if (error || !event) return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>couldn't load.</em></h1><p>{error || "Please check your connection and try again."}</p><button className="button button-dark" onClick={() => window.location.reload()}>Try again <ArrowRight size={16} /></button></div></div>;
   const gallery = getPublishedGallery(event.id);
   return <div className="invitation-page" id="top"><header className="invitation-nav"><Brand /><span>AN INVITATION TO CELEBRATE</span><Link to="/" className="invitation-nav-link">Made with <Heart size={13} /> Gather</Link></header><main><section className="invitation-hero" style={{ borderColor: `${event.accent}55`, backgroundImage: event.coverImage ? `linear-gradient(rgba(247,246,242,.5), rgba(247,246,242,.5)), url(${event.coverImage})` : undefined, backgroundSize: "cover", backgroundPosition: "center" }}><div className="invitation-hero-texture" style={{ backgroundColor: `${event.accent}18` }} /><div className="invitation-hero-content"><span className="invitation-kicker">WITH JOY IN OUR HEARTS</span><span className="invitation-monogram" style={{ color: event.accent }}>{event.graduateName.charAt(0)}</span><span className="invitation-kicker">{event.institution || "A NEW CHAPTER"}</span><h1>{event.title.split(" ").slice(0, -1).join(" ")}<br /><em>{event.title.split(" ").slice(-1)}</em></h1><p className="invitation-byline">A celebration for <b>{event.graduateName}</b></p><div className="invitation-date-line"><span>{formatDate(event.startAt, { day: "numeric", month: "long", year: "numeric" }, event.timezone)}</span><i /> <span>{formatTime(event.startAt, event.timezone)}</span></div><span className="invitation-venue-line"><MapPin size={14} />{event.venue} · {event.address}</span></div><span className="invitation-star star-a">✳</span><span className="invitation-star star-b">✴</span><span className="invitation-side-stamp">A DAY TO REMEMBER · LAGOS</span></section>
       <section className="invitation-details"><div className="invitation-details-copy"><div className="eyebrow"><span className="eyebrow-line" /> A NOTE FROM {event.graduateName.split(" ")[0].toUpperCase()}</div><h2>All the people<br />I love, in <em>one place.</em></h2><p>{event.personalMessage || event.description || "I would love for you to join me as I celebrate this special milestone."}</p><div className="invitation-academic">{[event.faculty, event.department, event.qualification].filter(Boolean).map((text) => <span key={text}>{text}</span>)}</div></div><div className="invitation-date-card"><span className="panel-kicker">SAVE THE DATE</span><b className="date-card-day">{new Date(event.startAt).getDate()}</b><span className="date-card-month">{new Date(event.startAt).toLocaleString("en", { month: "long", year: "numeric" })}</span><span className="date-card-divider" /><div className="date-card-info"><Clock3 size={15} /><span>{formatTime(event.startAt)}{event.endAt ? ` – ${formatTime(event.endAt)}` : ""}</span></div><div className="date-card-info"><MapPin size={15} /><span>{event.venue}<small>{event.address}</small></span></div>{event.instructions && <div className="date-card-instructions">{event.instructions}</div>}</div></section>
       <Countdown startAt={event.startAt} />
       {!!gallery.length && <PublicGallery images={gallery} />}
-      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p></div>{event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs are now closed. We hope to see you next time.</span> : <Link className="button button-dark button-large" to={`/event/${event.slug}/rsvp`}>Save me a seat <ArrowRight size={16} /></Link>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
+      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p></div>{event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs are now closed. We hope to see you next time.</span> : <span className="rsvp-closed">Please contact the graduate directly to RSVP.</span>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
 }
 
 function UnavailablePage() {
@@ -641,14 +722,25 @@ function RsvpConfirmation() {
 
 function EventOverviewPage() {
   const { eventId = "" } = useParams();
-  const { getEvent, getGuests, notify } = usePlatform();
+  const { getEvent, refreshEvent, notify } = usePlatform();
   const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void refreshEvent(eventId).catch((reason) => {
+      if (active) setLoadError(reason instanceof Error ? reason.message : "The event could not be loaded.");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [eventId]);
   const event = getEvent(eventId);
-  if (!event) return <NotFoundPage />;
-  const guests = getGuests(event.id);
-  const approvedPeople = guests.filter((guest) => guest.status === "Approved" && guest.attending).reduce((sum, guest) => sum + attendeeCount(guest), 0);
-  const checked = guests.reduce((sum, guest) => sum + guest.checkedIn.length, 0);
-  const pending = guests.filter((guest) => guest.status === "Pending").length;
+  if (loading && !event) return <div className="empty-state"><LoaderCircle className="spin" size={22} /> Loading event details…</div>;
+  if (!event) return loadError ? <div className="inline-error" role="alert">{loadError}<Link to="/dashboard/events" className="subtle-link">Back to events</Link></div> : <NotFoundPage />;
+  const approvedPeople = event.approvedAttendeeCount ?? 0;
+  const checked = 0;
+  const pending = event.pendingRegistrationCount ?? 0;
   const shareInvitation = async () => {
     const url = `${window.location.origin}/event/${event.slug}`;
     try {
@@ -667,8 +759,8 @@ function EventOverviewPage() {
   };
   return <div className="page-stack">
     <div className={`event-overview-hero${event.coverImage ? " has-cover" : ""}`}>{event.coverImage ? <img className="event-overview-cover" src={event.coverImage} alt="" aria-hidden="true" /> : <><div className="event-overview-pattern">✳</div><div className="event-hero-monogram">{event.graduateName.charAt(0)}</div></>}<div className="event-overview-hero-copy"><div className="event-overview-top"><span className="panel-kicker">YOUR CELEBRATION</span><StatusBadge status={event.status} /></div><h1>{event.title}</h1><p>{event.description || "All the details for your special day."}</p><div className="event-hero-meta"><span><CalendarDays size={15} />{formatDate(event.startAt)}</span><span><MapPin size={15} />{event.venue}</span></div><div className="event-overview-actions"><Link to={`/event/${event.slug}`} target="_blank" rel="noopener noreferrer" className="button button-outline button-sm">Preview invitation <ExternalLink size={14} /></Link><button className="button button-dark button-sm" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/event/${event.slug}`).then(() => notify("Invitation link copied."), () => notify("Couldn't copy the link. You can share the invitation directly.", "error")); }}><Copy size={14} /> Copy invitation link</button><button className="button button-outline button-sm" onClick={shareInvitation}><Share2 size={14} /> Share</button></div></div></div>
-    <div className="event-mini-stats">{[{ value: String(guests.length).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: String(checked).padStart(2, "0"), label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
-    <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest approvals</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div>{guests.filter((guest) => guest.status === "Pending").length ? <div className="compact-guest-list">{guests.filter((guest) => guest.status === "Pending").slice(0, 4).map((guest) => <div className="compact-guest" key={guest.id}><span className="guest-avatar">{guest.name.split(" ").map((p) => p[0]).join("")}</span><span><b>{guest.name}</b><small>{guest.attending ? `${attendeeCount(guest)} people` : "Not attending"} · ${formatDate(guest.submittedAt, { day: "numeric", month: "short" })}</small></span><StatusBadge status={guest.status} /><Link to={`/dashboard/events/${event.id}/guests/${guest.id}`} className="icon-button" aria-label={`Review ${guest.name}`}><ArrowRight size={15} /></Link></div>)}</div> : <EmptyState icon={<CheckCircle2 size={22} />} title="You're all caught up." text="New RSVP requests will show up here." />}</section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
+    <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: String(checked).padStart(2, "0"), label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
+    <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest approvals</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} awaiting review.` : "Guest details aren't connected yet."} text="Registration counts come from Gather. Individual guest review will appear when the RSVP management screen is connected." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
   </div>;
 }
 
@@ -887,8 +979,9 @@ function GalleryPage() {
 }
 
 function ProfilePage() {
-  const { notify } = usePlatform();
-  return <div className="page-stack"><PageTitle eyebrow="THE PERSON BEHIND THE PARTY" title="Your profile" description="A few details about you and your account." /><div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR DETAILS</span><h2>Profile information</h2></div></div><div className="profile-edit-avatar"><span className="profile-avatar profile-avatar-xl">AO</span><button className="button button-outline button-sm" onClick={() => notify("Profile photo uploads are available when connected to the API.")}>Change photo</button></div><div className="form-grid"><Field label="Full name" name="profile-name" defaultValue="Amara Okafor" /><Field label="Email address" name="profile-email" defaultValue="amara@example.com" type="email" /><div className="field field-span"><label htmlFor="profile-bio">A little about you</label><textarea id="profile-bio" rows={3} placeholder="Tell us something about yourself…" /></div></div><div className="settings-footer"><button className="button button-dark" onClick={() => notify("Profile updates require a connected account service.", "error")}>Save changes <Check size={15} /></button></div></section><aside className="panel profile-help"><span className="auth-icon"><UserRound size={19} /></span><h3>Your profile, your story.</h3><p>Your profile helps personalise the invitations you create. Update your name and details any time.</p><div className="demo-auth-note"><ShieldCheck size={15} /><span>Account changes are stored in this browser.</span></div></aside></div></div>;
+  const { notify, user } = usePlatform();
+  const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "G";
+  return <div className="page-stack"><PageTitle eyebrow="THE PERSON BEHIND THE PARTY" title="Your profile" description="A few details about you and your account." /><div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR DETAILS</span><h2>Profile information</h2></div></div><div className="profile-edit-avatar"><span className="profile-avatar profile-avatar-xl">{initials}</span></div><div className="form-grid"><Field label="Full name" name="profile-name" defaultValue={`${user?.firstName ?? ""} ${user?.lastName ?? ""}`.trim()} /><Field label="Email address" name="profile-email" defaultValue={user?.email ?? ""} type="email" /><div className="field field-span"><label htmlFor="profile-bio">A little about you</label><textarea id="profile-bio" rows={3} placeholder="Tell us something about yourself…" /></div></div><div className="settings-footer"><button className="button button-dark" onClick={() => notify("Profile editing is not available in the current API.", "error")}>Save changes <Check size={15} /></button></div></section><aside className="panel profile-help"><span className="auth-icon"><UserRound size={19} /></span><h3>Your profile, your story.</h3><p>Your Gather account details are loaded securely from your profile.</p><div className="demo-auth-note"><ShieldCheck size={15} /><span>Profile updates are not available in the current API.</span></div></aside></div></div>;
 }
 
 function SettingsPage() {

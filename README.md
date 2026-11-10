@@ -6,15 +6,18 @@ Responsive React + TypeScript frontend for the graduation invitation and guest m
 
 ```powershell
 npm.cmd install
+Copy-Item .env.example .env.local
 npm.cmd run dev
 ```
 
-Create a demo graduate session from **Sign in** or **Get started** using any valid email and a password of at least eight characters. The demo seeds an example event and guest list so the dashboard and check-in flows are immediately explorable.
+Set `VITE_API_BASE_URL` in `.env.local` to the backend origin (for example `http://localhost:4000`). The Vite development server also uses that local origin when the variable is omitted.
 
 ## Included journeys
 
 - Landing page and account screens.
-- Graduate overview, event list, and six-step event create/edit flow.
+- API-backed sign up, sign in, profile retrieval, protected dashboard, and event list/create/edit/publish/unpublish/soft-delete flows.
+- Public invitation details loaded by the event slug.
+- Graduate overview and six-step event create/edit flow.
 - Saved light and dark themes, with a quick dashboard toggle and appearance settings.
 - Public invitation, RSVP with configurable plus-ones, and confirmation.
 - Graduation memories gallery with multi-photo upload, preview, delete, reorder, per-photo publishing, accessible lightbox, individual downloads, and a published-photos ZIP download.
@@ -23,11 +26,13 @@ Create a demo graduate session from **Sign in** or **Get started** using any val
 - Camera QR scanning (HTTPS or localhost required by browsers) and manual check-in.
 - Gallery preview, profile, and settings screens.
 
-## Demo-mode boundary
+## Connected and not-yet-connected features
 
-There is no backend in this workspace yet. Authentication, events, RSVPs, tickets, approvals, check-ins, and uploaded gallery images are simulated in the browser and persisted in `localStorage`; they are not production security or authoritative records and are not shared across browsers. The public gallery reads only published photos for a published event and does not require login or RSVP approval in the demo. Production uploads, cross-device public access, and secure image URLs require the authenticated object-storage/API integration described in [TECHNICAL-SPECIFICATION.md](./TECHNICAL-SPECIFICATION.md); do not use browser storage for real guest or graduate data. Demo QR credentials are random opaque values and the UI explicitly marks tickets as previews. Camera and manual check-in update only local demo data.
+Authentication and event records are read from the backend API. The frontend stores the returned access token in `localStorage`; this allows browser reloads but makes the token accessible to JavaScript, so prevent cross-site scripting and consider an HttpOnly-cookie design for a higher-security deployment.
 
-Connect the frontend to the API and server-side authorization, ticket validation, transactional email, and object storage described in [TECHNICAL-SPECIFICATION.md](./TECHNICAL-SPECIFICATION.md) before using real accounts or events.
+RSVP submission/management, guest approval, tickets, check-in, notification activity, photo uploads/gallery persistence, profile editing, and password recovery are not connected in this phase. They must not be treated as authoritative server records. Local invitation image previews, end times, and gallery edits are not saved by the current API.
+
+The backend must be running with CORS configured for the frontend origin. See the backend project README for its local setup.
 
 ## Validate
 
