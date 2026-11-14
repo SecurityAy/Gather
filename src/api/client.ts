@@ -93,6 +93,91 @@ export type ApiPublicEvent = Pick<ApiEvent,
   | "additionalGuestLimit"
 >;
 
+export interface ApiRsvpSubmissionInput {
+  primaryGuestName: string;
+  primaryGuestEmail: string;
+  primaryGuestPhone: string;
+  relationshipToGraduate?: string;
+  attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
+  additionalGuestNames?: string[];
+}
+
+export interface ApiRsvpSubmissionResponse {
+  confirmationToken: string;
+  registration: {
+    attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
+    status: "PENDING" | "APPROVED" | "NOT_REQUIRED";
+    createdAt: string;
+    attendees: Array<{
+      firstName: string;
+      lastName: string;
+      attendeeType: "PRIMARY" | "ADDITIONAL";
+    }>;
+  };
+}
+
+export interface ApiRsvpConfirmationResponse {
+  confirmation: {
+    attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
+    status: "PENDING" | "APPROVED" | "NOT_REQUIRED";
+    relationshipToGraduate: string | null;
+    createdAt: string;
+    event: {
+      title: string;
+      slug: string;
+      eventDate: string | null;
+      timezone: string | null;
+      venueName: string | null;
+      venueAddress: string | null;
+      eventStatus: string;
+    };
+    attendees: Array<{
+      firstName: string;
+      lastName: string;
+      attendeeType: "PRIMARY" | "ADDITIONAL";
+    }>;
+  };
+}
+
+export type ApiOrganiserRsvpAttendanceIntent = "ATTENDING" | "NOT_ATTENDING";
+export type ApiOrganiserRsvpStatus = "PENDING" | "APPROVED" | "DECLINED" | "CANCELLED" | "NOT_REQUIRED";
+export type ApiOrganiserRsvpAttendeeType = "PRIMARY" | "ADDITIONAL";
+
+export interface ApiOrganiserRsvpAttendee {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  phone: string | null;
+  attendeeType: ApiOrganiserRsvpAttendeeType;
+  createdAt: string;
+}
+
+export interface ApiOrganiserRsvpRegistration {
+  id: string;
+  attendanceIntent: ApiOrganiserRsvpAttendanceIntent;
+  status: ApiOrganiserRsvpStatus;
+  relationshipToGraduate: string | null;
+  createdAt: string;
+  attendees: ApiOrganiserRsvpAttendee[];
+}
+
+export interface ApiOrganiserRsvpPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface ApiOrganiserRsvpListResponse {
+  registrations: ApiOrganiserRsvpRegistration[];
+  pagination: ApiOrganiserRsvpPagination;
+}
+
+export interface ApiOrganiserRsvpDetailResponse {
+  registration: ApiOrganiserRsvpRegistration;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -200,5 +285,29 @@ export const api = {
   publicEvent: (slug: string) =>
     request<{ event: ApiPublicEvent }>(
       `/api/events/public/${encodeURIComponent(slug)}`,
+    ),
+  submitRsvp: (slug: string, input: ApiRsvpSubmissionInput) =>
+    request<ApiRsvpSubmissionResponse>(
+      `/api/events/public/${encodeURIComponent(slug)}/rsvp`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    ),
+  getRsvpConfirmation: (slug: string, token: string) =>
+    request<ApiRsvpConfirmationResponse>(
+      `/api/events/public/${encodeURIComponent(slug)}/rsvp/confirmation`,
+      {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      },
+    ),
+  listOrganiserRsvps: (eventId: string, page = 1, pageSize = 20) =>
+    request<ApiOrganiserRsvpListResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps?page=${page}&pageSize=${pageSize}`,
+    ),
+  getOrganiserRsvp: (eventId: string, registrationId: string) =>
+    request<ApiOrganiserRsvpDetailResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}`,
     ),
 };

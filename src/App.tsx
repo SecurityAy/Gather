@@ -11,9 +11,10 @@ import {
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import JSZip from "jszip";
-import { attendeeCount, formatDate, formatTime, getDemoTicketToken, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
-import type { EventRecord, GalleryImage, GuestRecord, GuestStatus } from "./platform";
+import { formatDate, formatTime, getDemoTicketToken, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
+import type { EventRecord, GalleryImage, GuestRecord } from "./platform";
 import { api, ApiError } from "./api/client";
+import type { ApiOrganiserRsvpRegistration, ApiRsvpConfirmationResponse } from "./api/client";
 
 const ticketToken = (guest: GuestRecord, attendeeName: string) => getDemoTicketToken(guest, attendeeName);
 const Scanner = lazy(() => import("./Scanner"));
@@ -605,7 +606,7 @@ function PublicEventPage() {
       <section className="invitation-details"><div className="invitation-details-copy"><div className="eyebrow"><span className="eyebrow-line" /> A NOTE FROM {event.graduateName.split(" ")[0].toUpperCase()}</div><h2>All the people<br />I love, in <em>one place.</em></h2><p>{event.personalMessage || event.description || "I would love for you to join me as I celebrate this special milestone."}</p><div className="invitation-academic">{[event.faculty, event.department, event.qualification].filter(Boolean).map((text) => <span key={text}>{text}</span>)}</div></div><div className="invitation-date-card"><span className="panel-kicker">SAVE THE DATE</span><b className="date-card-day">{new Date(event.startAt).getDate()}</b><span className="date-card-month">{new Date(event.startAt).toLocaleString("en", { month: "long", year: "numeric" })}</span><span className="date-card-divider" /><div className="date-card-info"><Clock3 size={15} /><span>{formatTime(event.startAt)}{event.endAt ? ` – ${formatTime(event.endAt)}` : ""}</span></div><div className="date-card-info"><MapPin size={15} /><span>{event.venue}<small>{event.address}</small></span></div>{event.instructions && <div className="date-card-instructions">{event.instructions}</div>}</div></section>
       <Countdown startAt={event.startAt} />
       {!!gallery.length && <PublicGallery images={gallery} />}
-      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p></div>{event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs are now closed. We hope to see you next time.</span> : <span className="rsvp-closed">Please contact the graduate directly to RSVP.</span>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
+      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p></div>{event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs are now closed. We hope to see you next time.</span> : <Link className="button button-dark button-large" to={`/event/${event.slug}/rsvp`}>Save me a seat <ArrowRight size={16} /></Link>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
 }
 
 function UnavailablePage() {
@@ -691,45 +692,129 @@ function ImageLightbox({ images, active, onSelect, onClose }: { images: string[]
 
 function RsvpPage() {
   const { slug = "" } = useParams();
-  const { getEvent, getGuests, addGuest, notify } = usePlatform();
-  const event = getEvent(slug);
+  const { notify } = usePlatform();
   const navigate = useNavigate();
+  const [event, setEvent] = useState<EventRecord | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [notFound, setNotFound] = useState(false);
   const [attending, setAttending] = useState<boolean | null>(null);
   const [count, setCount] = useState(0);
   const [names, setNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  if (!event || event.status !== "Published") return <UnavailablePage />;
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    setNotFound(false);
+    api.publicEvent(slug).then(({ event: publicEvent }) => {
+      if (active) setEvent(publicEventFromApi(publicEvent));
+    }).catch((reason) => {
+      if (!active) return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        setNotFound(true);
+      } else {
+        setLoadError(reason instanceof Error ? reason.message : "The invitation could not be loaded.");
+      }
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [slug]);
+
+  if (loading) return <div className="simple-auth"><div className="auth-form-wrap"><LoaderCircle className="spin" size={24} /><p>Opening your RSVP…</p></div></div>;
+  if (notFound) return <UnavailablePage />;
+  if (loadError || !event) return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>couldn't load.</em></h1><p>{loadError || "Please check your connection and try again."}</p><button className="button button-dark" onClick={() => window.location.reload()}>Try again <ArrowRight size={16} /></button></div></div>;
+
   const closed = event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date();
   if (closed) return <div className="rsvp-closed-page"><Brand /><div className="simple-auth-card"><div className="auth-icon"><Clock3 size={20} /></div><span className="eyebrow"><span className="eyebrow-line" /> RSVP WINDOW CLOSED</span><h1>We wish you<br /><em>could join us.</em></h1><p>RSVPs for {event.title} closed on {formatDate(event.rsvpDeadline)}. Please reach out to {event.graduateName} if you have any questions.</p><Link className="back-link" to={`/event/${slug}`}><ArrowLeft size={15} /> Back to invitation</Link></div></div>;
+
   const handleCount = (value: number) => {
     const safe = Math.min(event.additionalLimit, Math.max(0, value));
     setCount(safe);
     setNames((current) => Array.from({ length: safe }, (_, index) => current[index] || ""));
   };
-  const submit = (formEvent: FormEvent<HTMLFormElement>) => {
+
+  const submit = async (formEvent: FormEvent<HTMLFormElement>) => {
     formEvent.preventDefault();
     if (attending === null) { setError("Let us know if you'll be there."); return; }
     const data = new FormData(formEvent.currentTarget);
-    const extras = attending ? names.map((name) => name.trim()) : [];
-    if (extras.some((name) => !name)) { setError("Add a name for each of your guests."); return; }
-    const email = String(data.get("email")).trim().toLowerCase();
-    const phone = String(data.get("phone")).replace(/\D/g, "");
-    const duplicate = getGuests(event.id).some((guest) =>
-      guest.email.trim().toLowerCase() === email || guest.phone.replace(/\D/g, "") === phone);
-    if (duplicate) {
-      setError("It looks like you may already have responded. Please contact the event host to update your RSVP.");
+    const rawPrimaryName = String(data.get("name") ?? "").trim();
+    const primaryParts = rawPrimaryName.split(/\s+/).filter(Boolean);
+    if (primaryParts.length < 2 || rawPrimaryName.length < 2) {
+      setError("Please enter your first and last name.");
       return;
     }
+    const email = String(data.get("email") ?? "").trim().toLowerCase();
+    const phone = String(data.get("phone") ?? "").trim();
+    const phoneDigits = phone.replace(/\D/g, "");
+    if (!/^[+()\d.\-\s]+$/.test(phone) || phoneDigits.length < 7 || phoneDigits.length > 15) {
+      setError("Please enter a valid phone number with 7 to 15 digits.");
+      return;
+    }
+    const relationship = String(data.get("relationship") ?? "").trim();
+
+    let additionalGuestNames: string[] = [];
+    if (attending && count > 0) {
+      const extras = names.slice(0, count).map((n) => n.trim());
+      if (extras.some((n) => !n)) {
+        setError("Add a name for each of your guests.");
+        return;
+      }
+      for (let i = 0; i < extras.length; i++) {
+        const parts = extras[i].split(/\s+/).filter(Boolean);
+        if (parts.length < 2 || extras[i].length < 2) {
+          setError(`Please enter both a first and last name for guest ${i + 1}.`);
+          return;
+        }
+      }
+      additionalGuestNames = extras;
+    }
+
     setError("");
     setBusy(true);
-    window.setTimeout(() => {
-      const guest = addGuest({ eventId: event.id, name: String(data.get("name")).trim(), email: String(data.get("email")).trim(), phone: String(data.get("phone")).trim(), relationship: String(data.get("relationship")), attending, additionalGuests: extras, status: "Pending" });
+
+    try {
+      const result = await api.submitRsvp(slug, {
+        primaryGuestName: rawPrimaryName,
+        primaryGuestEmail: email,
+        primaryGuestPhone: phone,
+        relationshipToGraduate: relationship || undefined,
+        attendanceIntent: attending ? "ATTENDING" : "NOT_ATTENDING",
+        additionalGuestNames: attending ? additionalGuestNames : [],
+      });
+      try {
+        sessionStorage.setItem(`gather.rsvp.${slug}.token`, result.confirmationToken);
+      } catch {
+        // sessionStorage might be restricted
+      }
       notify("Your RSVP has been received.");
-      navigate(`/event/${slug}/confirmation`, { state: { guestId: guest.id } });
+      navigate(`/event/${slug}/confirmation`, {
+        state: { token: result.confirmationToken },
+      });
+    } catch (reason) {
+      if (reason instanceof ApiError) {
+        if (reason.status === 409) {
+          setError(reason.message || "This RSVP conflicts with a recent submission. Please try again.");
+        } else if (reason.status === 410) {
+          setError("The RSVP deadline has passed and submissions are now closed.");
+        } else if (reason.status === 429) {
+          setError(reason.message || "Too many requests. Please wait a moment before trying again.");
+        } else if (reason.status === 400 && reason.details?.length) {
+          setError(reason.details.map((d) => d.message).join(" "));
+        } else {
+          setError(reason.message || "We couldn't submit your RSVP. Please try again.");
+        }
+      } else {
+        setError(reason instanceof Error ? reason.message : "We couldn't submit your RSVP. Please try again.");
+      }
+    } finally {
       setBusy(false);
-    }, 450);
+    }
   };
+
   return <div className="rsvp-page"><header className="rsvp-header"><Brand /><Link className="back-link" to={`/event/${slug}`}><ArrowLeft size={15} /> Back to invitation</Link></header><main className="rsvp-layout"><aside className="rsvp-aside"><span className="eyebrow"><span className="eyebrow-line" /> YOU'RE INVITED</span><h1>{event.title}<br /><em>with {event.graduateName.split(" ")[0]}.</em></h1><div className="rsvp-aside-meta"><span><CalendarDays size={15} />{formatDate(event.startAt, { day: "numeric", month: "long" })}</span><span><MapPin size={15} />{event.venue}</span></div><div className="rsvp-quote">“{event.personalMessage || "It wouldn't be the same without you."}”<small>— {event.graduateName}</small></div><div className="rsvp-extra-note"><Users size={16} />{event.additionalLimit ? `You can bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : "This invitation is just for you."}</div></aside><section className="rsvp-form-card"><div className="rsvp-form-top"><span className="panel-kicker">A QUICK NOTE BACK</span><span>01 <i>/</i> 01</span></div><h2>Can you <em>make it?</em></h2><p className="rsvp-form-intro">Tell us a little about yourself so {event.graduateName.split(" ")[0]} knows who's coming.</p><form onSubmit={submit} className="form-stack">
       <div className="field"><label htmlFor="rsvp-name">Your full name <span className="required-star">*</span></label><input id="rsvp-name" name="name" placeholder="As it appears on your ticket" required /></div>
       <div className="form-grid"><div className="field"><label htmlFor="rsvp-email">Email address <span className="required-star">*</span></label><input id="rsvp-email" name="email" type="email" placeholder="you@example.com" required /></div><div className="field"><label htmlFor="rsvp-phone">Phone number <span className="required-star">*</span></label><input id="rsvp-phone" name="phone" type="tel" placeholder="+234 800 000 0000" required /></div></div>
@@ -744,12 +829,115 @@ function RsvpPage() {
 
 function RsvpConfirmation() {
   const { slug = "" } = useParams();
-  const { getEvent, guests } = usePlatform();
   const location = useLocation();
-  const event = getEvent(slug);
-  const guestId = (location.state as { guestId?: string } | null)?.guestId;
-  const guest = guests.find((item) => item.id === guestId);
-  return <div className="confirmation-page"><Brand /><div className="confirmation-card"><div className="confirmation-spark">✳</div><div className="eyebrow"><span className="eyebrow-line" /> IT'S ON ITS WAY</div><h1>{guest?.attending ? "Your seat is" : "We'll miss you,"}<br /><em>{guest?.attending ? "almost yours." : "but we understand."}</em></h1><p>{guest ? (guest.attending ? `${guest.name}, your RSVP for ${event?.title} is with ${event?.graduateName} for approval.` : `${event?.graduateName} will be sorry to miss you at ${event?.title}.`) : "Your RSVP was submitted. Check your email for next steps."}</p>{guest?.attending && <div className="confirmation-next"><span className="step-icon"><Clock3 size={18} /></span><span><b>Waiting for approval</b><small>We'll send your individual ticket by email once you're approved.</small></span><StatusBadge status={guest.status} /></div>}<Link className="button button-dark" to={`/event/${slug}`}>Back to the invitation <ArrowRight size={16} /></Link><span className="confirmation-signoff">With love, {event?.graduateName || "your graduate"}</span></div></div>;
+  // const [searchParams] = useSearchParams();
+  const stateToken = (location.state as { token?: string } | null)?.token;
+  // const queryToken = searchParams.get("token") || undefined;
+  const storedToken = (() => {
+    try {
+      return sessionStorage.getItem(`gather.rsvp.${slug}.token`) || undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  const token = stateToken || storedToken || "";
+
+  const [confirmation, setConfirmation] = useState<ApiRsvpConfirmationResponse["confirmation"] | null>(null);
+  const [graduateName, setGraduateName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!token) {
+      setLoading(false);
+      setError("No RSVP confirmation token was found. If you recently submitted your RSVP, please check your email or contact the host.");
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    setError("");
+    Promise.all([
+      api.getRsvpConfirmation(slug, token),
+      api.publicEvent(slug).catch(() => null),
+    ]).then(([confResult, publicResult]) => {
+      if (!active) return;
+      setConfirmation(confResult.confirmation);
+      try {
+        sessionStorage.setItem(`gather.rsvp.${slug}.token`, token);
+      } catch {
+        // ignore
+      }
+      if (publicResult?.event?.graduateName) {
+        setGraduateName(publicResult.event.graduateName);
+      }
+    }).catch((reason) => {
+      if (!active) return;
+      if (reason instanceof ApiError && reason.status === 404) {
+        setError("This RSVP confirmation could not be found. It may be invalid or expired.");
+      } else if (reason instanceof ApiError && reason.status === 429) {
+        setError("Too many requests. Please wait a moment and try again.");
+      } else {
+        setError(reason instanceof Error ? reason.message : "Could not retrieve your confirmation.");
+      }
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [slug, token]);
+
+  if (loading) {
+    return <div className="simple-auth"><div className="auth-form-wrap"><LoaderCircle className="spin" size={24} /><p>Retrieving your confirmation…</p></div></div>;
+  }
+
+  if (error || !confirmation) {
+    return (
+      <div className="simple-error">
+        <Brand />
+        <div className="error-card">
+          <span className="error-ornament">✳</span>
+          <div className="eyebrow"><span className="eyebrow-line" /> CONFIRMATION NOT FOUND</div>
+          <h1>We couldn't<br /><em>find your RSVP.</em></h1>
+          <p>{error || "No confirmation details available."}</p>
+          <Link className="button button-dark" to={`/event/${slug}`}>Back to the invitation <ArrowRight size={16} /></Link>
+        </div>
+      </div>
+    );
+  }
+
+  const isAttending = confirmation.attendanceIntent === "ATTENDING";
+  const primaryAttendee = confirmation.attendees.find((a) => a.attendeeType === "PRIMARY") || confirmation.attendees[0];
+  const guestName = primaryAttendee ? `${primaryAttendee.firstName} ${primaryAttendee.lastName}`.trim() : "Your seat";
+  const eventTitle = confirmation.event?.title || "the celebration";
+  const displayGraduate = graduateName || "your graduate";
+  const badgeStatus = confirmation.status === "APPROVED" ? "Approved" : confirmation.status === "PENDING" ? "Pending" : "Received";
+
+  return (
+    <div className="confirmation-page">
+      <Brand />
+      <div className="confirmation-card">
+        <div className="confirmation-spark">✳</div>
+        <div className="eyebrow"><span className="eyebrow-line" /> IT'S ON ITS WAY</div>
+        <h1>{isAttending ? "Your seat is" : "We'll miss you,"}<br /><em>{isAttending ? "almost yours." : "but we understand."}</em></h1>
+        <p>
+          {isAttending
+            ? `${guestName}, your RSVP for ${eventTitle} is with ${displayGraduate} for approval.`
+            : `${displayGraduate} will be sorry to miss you at ${eventTitle}.`}
+        </p>
+        {isAttending && (
+          <div className="confirmation-next">
+            <span className="step-icon"><Clock3 size={18} /></span>
+            <span>
+              <b>Waiting for approval</b>
+              <small>We'll send your individual ticket by email once you're approved.</small>
+            </span>
+            <StatusBadge status={badgeStatus} />
+          </div>
+        )}
+        <Link className="button button-dark" to={`/event/${slug}`}>Back to the invitation <ArrowRight size={16} /></Link>
+        <span className="confirmation-signoff">With love, {displayGraduate}</span>
+      </div>
+    </div>
+  );
 }
 
 function EventOverviewPage() {
@@ -801,59 +989,114 @@ function EventOverviewPage() {
     {justPublished && <div className="confetti-burst" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <span key={index} style={{ left: `${(index * 47 + 7) % 100}%`, animationDelay: `${index % 6 * 70}ms`, backgroundColor: `hsl(${(index * 43) % 360} 55% 65%)` }} />)}</div>}
     <div className={`event-overview-hero${event.coverImage ? " has-cover" : ""}`}>{event.coverImage ? <img className="event-overview-cover" src={event.coverImage} alt="" aria-hidden="true" /> : <><div className="event-overview-pattern">✳</div><div className="event-hero-monogram">{event.graduateName.charAt(0)}</div></>}<div className="event-overview-hero-copy"><div className="event-overview-top"><span className="panel-kicker">YOUR CELEBRATION</span><StatusBadge status={event.status} /></div><h1>{event.title}</h1><p>{event.description || "All the details for your special day."}</p><div className="event-hero-meta"><span><CalendarDays size={15} />{formatDate(event.startAt)}</span><span><MapPin size={15} />{event.venue}</span></div><div className="event-overview-actions"><Link to={`/event/${event.slug}`} target="_blank" rel="noopener noreferrer" className="button button-outline button-sm">Preview invitation <ExternalLink size={14} /></Link><button className="button button-dark button-sm" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/event/${event.slug}`).then(() => notify("Invitation link copied."), () => notify("Couldn't copy the link. You can share the invitation directly.", "error")); }}><Copy size={14} /> Copy invitation link</button><button className="button button-outline button-sm" onClick={shareInvitation}><Share2 size={14} /> Share</button></div></div></div>
     <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: String(checked).padStart(2, "0"), label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
-    <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest approvals</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} awaiting review.` : "Guest details aren't connected yet."} text="Registration counts come from Gather. Individual guest review will appear when the RSVP management screen is connected." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
+    <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest RSVPs</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} pending.` : "Your RSVP details are ready to view."} text="You can view submitted RSVPs and individual guest details. RSVP approval and rejection aren't available yet." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
   </div>;
 }
 
 function GuestManagementPage() {
   const { eventId = "" } = useParams();
-  const { getEvent, getGuests, updateGuestStatus, notify } = usePlatform();
+  const { getEvent } = usePlatform();
   const event = getEvent(eventId);
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"table" | "cards">(() => window.matchMedia("(max-width: 680px)").matches ? "cards" : "table");
+  const [registrations, setRegistrations] = useState<ApiOrganiserRsvpRegistration[]>([]);
+  const [page, setPage] = useState(1);
+  const [reloadCount, setReloadCount] = useState(0);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   useEffect(() => {
     const media = window.matchMedia("(max-width: 680px)");
     const updateView = () => setView(media.matches ? "cards" : "table");
     media.addEventListener("change", updateView);
     return () => media.removeEventListener("change", updateView);
   }, []);
+  useEffect(() => {
+    if (!event) return;
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    void api.listOrganiserRsvps(event.id, page, 20).then((result) => {
+      if (!active) return;
+      setRegistrations(result.registrations);
+      setPagination(result.pagination);
+    }).catch((reason) => {
+      if (!active) return;
+      setRegistrations([]);
+      setPagination({ page, pageSize: 20, total: 0, totalPages: 0 });
+      setLoadError(reason instanceof Error ? reason.message : "Could not load RSVP registrations.");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [event?.id, page, reloadCount]);
   if (!event) return <NotFoundPage />;
-  const guests = getGuests(event.id);
-  const filters = ["All", "Pending", "Approved", "Declined", "Not attending"];
-  const results = guests.filter((guest) => {
-    const matchesFilter = filter === "All" || (filter === "Not attending" ? !guest.attending : guest.status === filter);
-    const search = `${guest.name} ${guest.email} ${guest.phone}`.toLowerCase().includes(query.toLowerCase());
-    return matchesFilter && search;
+  const filters = ["All", "Pending", "Approved", "Declined", "Cancelled", "Not required", "Not attending"];
+  const resultRows = registrations.map((registration) => {
+    const primary = registration.attendees.find((attendee) => attendee.attendeeType === "PRIMARY");
+    const additional = registration.attendees.filter((attendee) => attendee.attendeeType === "ADDITIONAL");
+    const fullName = (attendee: typeof registration.attendees[number]) => `${attendee.firstName} ${attendee.lastName}`.trim();
+    return { registration, primary, additional, fullName };
   });
-  const act = (guest: GuestRecord, status: GuestStatus) => {
-    updateGuestStatus(guest.id, status);
-    notify(`${guest.name}'s group was ${status.toLowerCase()}.`);
-  };
+  const results = resultRows.filter(({ registration, primary, additional, fullName }) => {
+    const matchesFilter = filter === "All"
+      || (filter === "Not attending" ? registration.attendanceIntent === "NOT_ATTENDING" : registration.status === filter.toUpperCase().replaceAll(" ", "_"));
+    const searchable = [primary ? fullName(primary) : "", primary?.email ?? "", primary?.phone ?? "", registration.relationshipToGraduate ?? "", ...additional.map(fullName)].join(" ").toLowerCase();
+    return matchesFilter && searchable.includes(query.trim().toLowerCase());
+  });
+  const statusLabel = (status: string) => status === "NOT_REQUIRED" ? "Not required" : status[0] + status.slice(1).toLowerCase();
+  const dateLabel = (value: string) => formatDate(value, { day: "numeric", month: "short", year: "numeric" });
+  const pageCounts = (status: string) => status === "All"
+    ? registrations.length
+    : status === "Not attending"
+      ? registrations.filter((item) => item.attendanceIntent === "NOT_ATTENDING").length
+      : registrations.filter((item) => item.status === status.toUpperCase().replaceAll(" ", "_")).length;
   return <div className="page-stack">
-    <PageTitle eyebrow={event.title.toUpperCase()} title="Your guest list" description="A little hello from everyone who wants to celebrate with you." action={<button className="button button-outline" onClick={() => notify("Guest export will be available when connected to your API.")}><Download size={15} /> Export list</button>} />
-    <div className="guest-summary-grid">{[{ value: guests.length, label: "RSVPs received", color: "lavender" }, { value: guests.filter((guest) => guest.status === "Pending").length, label: "Need your approval", color: "peach" }, { value: guests.filter((guest) => guest.status === "Approved").reduce((n, guest) => n + attendeeCount(guest), 0), label: "Guests approved", color: "sage" }, { value: guests.reduce((n, guest) => n + guest.checkedIn.length, 0), label: "Checked in", color: "sky" }].map((stat) => <div className="guest-summary" key={stat.label}><span className={`summary-dot ${stat.color}`} /><b>{String(stat.value).padStart(2, "0")}</b><small>{stat.label}</small></div>)}</div>
-    <section className="panel guest-list-panel"><div className="guest-toolbar"><div className="guest-filter-tabs">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}<span>{item === "All" ? guests.length : item === "Not attending" ? guests.filter((guest) => !guest.attending).length : guests.filter((guest) => guest.status === item).length}</span></button>)}</div><div className="guest-search-row"><div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search guests…" /></div><div className="view-switch"><button aria-label="Table view" className={view === "table" ? "selected" : ""} onClick={() => setView("table")}><ListFilter size={16} /></button><button aria-label="Card view" className={view === "cards" ? "selected" : ""} onClick={() => setView("cards")}><LayoutDashboard size={16} /></button></div></div></div>
-      {results.length ? view === "table" ? <div className="table-scroll"><table className="guest-table"><thead><tr><th>GUEST</th><th>PHONE</th><th>GROUP</th><th>SUBMITTED</th><th>STATUS</th><th aria-label="Actions" /></tr></thead><tbody>{results.map((guest) => <tr key={guest.id}><td><Link to={`/dashboard/events/${event.id}/guests/${guest.id}`} className="guest-name-cell"><span className="guest-avatar">{guest.name.split(" ").map((p) => p[0]).join("")}</span><span><b>{guest.name}</b><small>{guest.email}</small></span></Link></td><td>{guest.phone}</td><td>{guest.attending ? `${attendeeCount(guest)} ${attendeeCount(guest) === 1 ? "person" : "people"}` : "Not attending"}</td><td>{formatDate(guest.submittedAt, { day: "numeric", month: "short" })}</td><td><StatusBadge status={guest.status} /></td><td><div className="table-actions">{guest.status === "Pending" && guest.attending && <button className="mini-action approve-action" onClick={() => act(guest, "Approved")} aria-label={`Approve ${guest.name}`}><Check size={14} /></button>}{guest.status === "Pending" && <button className="mini-action decline-action" onClick={() => { if (window.confirm(`Decline ${guest.name}'s RSVP?`)) act(guest, "Declined"); }} aria-label={`Decline ${guest.name}`}><X size={14} /></button>}<Link className="mini-action" to={`/dashboard/events/${event.id}/guests/${guest.id}`} aria-label={`View ${guest.name}`}><ArrowRight size={14} /></Link></div></td></tr>)}</tbody></table></div> : <div className="guest-card-grid">{results.map((guest) => <GuestCard key={guest.id} guest={guest} eventId={event.id} onApprove={() => act(guest, "Approved")} onDecline={() => { if (window.confirm(`Decline ${guest.name}'s RSVP?`)) act(guest, "Declined"); }} />)}</div> : <EmptyState icon={<Search size={22} />} title={guests.length ? "No guests match that." : "Your guest list is waiting."} text={guests.length ? "Try another name or filter." : "When your guests RSVP, you'll find them right here."} />}
+    <PageTitle eyebrow={event.title.toUpperCase()} title="Your guest list" description="A little hello from everyone who wants to celebrate with you." />
+    <div className="guest-summary-grid">{[{ value: pagination.total, label: "Total RSVPs", color: "lavender" }, { value: registrations.length, label: "On this page", color: "peach" }].map((stat) => <div className="guest-summary" key={stat.label}><span className={`summary-dot ${stat.color}`} /><b>{String(stat.value).padStart(2, "0")}</b><small>{stat.label}</small></div>)}</div>
+    <section className="panel guest-list-panel"><div className="guest-toolbar"><div className="guest-filter-tabs">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}<span>{pageCounts(item)}</span></button>)}</div><div className="guest-search-row"><div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page…" /></div><div className="view-switch"><button aria-label="Table view" className={view === "table" ? "selected" : ""} onClick={() => setView("table")}><ListFilter size={16} /></button><button aria-label="Card view" className={view === "cards" ? "selected" : ""} onClick={() => setView("cards")}><LayoutDashboard size={16} /></button></div></div></div>
+      {loading ? <div className="empty-state"><LoaderCircle className="spin" size={22} /><h3>Loading RSVPs</h3><p>Fetching registrations for this event.</p></div>
+          : loadError ? <EmptyState icon={<XCircle size={22} />} title="RSVPs couldn't load." text={loadError} action={<button className="button button-outline" onClick={() => setReloadCount((current) => current + 1)}>Try again</button>} />
+          : results.length ? view === "table" ? <div className="table-scroll"><table className="guest-table"><thead><tr><th>PRIMARY GUEST</th><th>PHONE</th><th>ATTENDANCE</th><th>ADDITIONAL GUESTS</th><th>SUBMITTED</th><th>STATUS</th><th aria-label="Details" /></tr></thead><tbody>{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; return <tr key={registration.id}><td><Link to={`/dashboard/events/${event.id}/guests/${registration.id}`} className="guest-name-cell"><span className="guest-avatar">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><span><b>{name}</b><small>{primary?.email || "Email not provided"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</small></span></Link></td><td>{primary?.phone || "Not provided"}</td><td>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</td><td>{additional.length ? additional.map(fullName).join(", ") : "None"}</td><td>{dateLabel(registration.createdAt)}</td><td><StatusBadge status={statusLabel(registration.status)} /></td><td><Link className="mini-action" to={`/dashboard/events/${event.id}/guests/${registration.id}`} aria-label={`View ${name}`}><ArrowRight size={14} /></Link></td></tr>; })}</tbody></table></div> : <div className="guest-card-grid">{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; return <Link className="guest-card" key={registration.id} to={`/dashboard/events/${event.id}/guests/${registration.id}`}><div className="guest-card-top"><span className="guest-avatar guest-avatar-large">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><StatusBadge status={statusLabel(registration.status)} /></div><h3>{name}</h3><p>{primary?.email || "Email not provided"}</p><div className="guest-card-detail"><span>{primary?.phone || "Phone not provided"}</span><span>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</span></div><p>{additional.length ? `Additional guests: ${additional.map(fullName).join(", ")}` : "No additional guests"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</p><small>{dateLabel(registration.createdAt)}</small></Link>; })}</div>
+          : <EmptyState icon={<Search size={22} />} title={registrations.length ? "No RSVPs match that." : "Your guest list is waiting."} text={registrations.length ? "Try another name or filter on this page." : "When guests RSVP, their registrations will appear here."} />}
+      {!loading && !loadError && pagination.totalPages > 1 && <div className="guest-pagination"><button className="button button-outline button-sm" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={pagination.page <= 1}><ChevronLeft size={15} /> Previous</button><span>Page {pagination.page} of {pagination.totalPages} · {pagination.total} registrations</span><button className="button button-outline button-sm" onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))} disabled={pagination.page >= pagination.totalPages}>Next <ChevronRight size={15} /></button></div>}
     </section>
   </div>;
 }
 
-function GuestCard({ guest, eventId, onApprove, onDecline }: { guest: GuestRecord; eventId: string; onApprove: () => void; onDecline: () => void }) {
-  return <article className="guest-card"><div className="guest-card-top"><span className="guest-avatar guest-avatar-large">{guest.name.split(" ").map((p) => p[0]).join("")}</span><StatusBadge status={guest.status} /></div><h3>{guest.name}</h3><p>{guest.email}</p><div className="guest-card-detail"><span>{guest.phone}</span><span>{attendeeCount(guest)} {attendeeCount(guest) === 1 ? "guest" : "guests"}</span></div><div className="guest-card-actions">{guest.status === "Pending" && guest.attending && <button className="button button-dark button-sm" onClick={onApprove}>Approve</button>}{guest.status === "Pending" && <button className="button button-outline button-sm" onClick={onDecline}>Decline</button>}<Link className="button button-outline button-sm" to={`/dashboard/events/${eventId}/guests/${guest.id}`}>Details</Link></div></article>;
-}
-
 function GuestDetailsPage() {
   const { eventId = "", guestId = "" } = useParams();
-  const { getEvent, getGuests, updateGuestStatus, notify } = usePlatform();
-  const navigate = useNavigate();
+  const { getEvent } = usePlatform();
   const event = getEvent(eventId);
-  const guest = getGuests(eventId).find((item) => item.id === guestId);
-  if (!event || !guest) return <NotFoundPage />;
-  const approve = () => { updateGuestStatus(guest.id, "Approved"); notify("Guest group approved. Individual tickets are ready."); };
-  const decline = () => { if (window.confirm(`Decline ${guest.name}'s RSVP?`)) { updateGuestStatus(guest.id, "Declined"); notify("Guest group declined."); } };
-  const people = guest.attending ? [guest.name, ...guest.additionalGuests] : [];
-  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all guests</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{guest.name.split(" ").map((p) => p[0]).join("")}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guest.name}</h1><p>Submitted {formatDate(guest.submittedAt)} · {event.title}</p></div><StatusBadge status={guest.status} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={guest.email} /><DetailRow label="Phone number" value={guest.phone} /><DetailRow label="Relationship" value={guest.relationship} /><DetailRow label="Attending" value={guest.attending ? "Yes, looking forward to it" : "Sorry to miss it"} /><DetailRow label="Group size" value={`${attendeeCount(guest)} ${attendeeCount(guest) === 1 ? "person" : "people"}`} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{people.length ? people.map((name, index) => <div className="detail-person" key={name}><span className="guest-avatar">{name.split(" ").map((p) => p[0]).join("")}</span><span><b>{name}</b><small>{index === 0 ? "Primary guest" : "Additional guest"}</small></span>{guest.checkedIn.includes(name) && <StatusBadge status="Checked in" />}</div>) : <p className="muted-copy">No attendees in this group.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">WHAT'S NEXT</span><h2>{guest.status === "Pending" ? "Review this RSVP" : guest.status === "Approved" ? "Your guest is all set." : "This RSVP was declined."}</h2><p>{guest.status === "Pending" ? "Approving confirms the whole group. Individual tickets will be created for each attendee." : guest.status === "Approved" ? "Every attendee has their own ticket to make check-in easy." : "No valid tickets are issued for a declined group."}</p>{guest.status === "Pending" && <><button className="button button-dark button-full" onClick={approve}><Check size={15} /> Approve this group</button><button className="button button-outline button-full" onClick={decline}><X size={15} /> Decline RSVP</button></>}{guest.status === "Approved" && <button className="button button-dark button-full" onClick={() => navigate(`/dashboard/events/${event.id}/tickets`)}><Ticket size={15} /> View their tickets</button>}</aside></div></div>;
+  const [registration, setRegistration] = useState<ApiOrganiserRsvpRegistration | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  useEffect(() => {
+    if (!event) return;
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    void api.getOrganiserRsvp(event.id, guestId).then(({ registration: result }) => {
+      if (active) setRegistration(result);
+    }).catch((reason) => {
+      if (!active) return;
+      setRegistration(null);
+      setLoadError(reason instanceof Error ? reason.message : "Could not load this RSVP registration.");
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [event?.id, guestId]);
+  if (!event) return <NotFoundPage />;
+  if (loading) return <div className="empty-state"><LoaderCircle className="spin" size={22} /><h3>Loading RSVP details</h3><p>Fetching this registration.</p></div>;
+  if (loadError || !registration) return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><EmptyState icon={<XCircle size={22} />} title="RSVP details couldn't load." text={loadError || "This registration could not be found."} /></div>;
+  const primary = registration.attendees.find((attendee) => attendee.attendeeType === "PRIMARY");
+  const additional = registration.attendees.filter((attendee) => attendee.attendeeType === "ADDITIONAL");
+  const fullName = (attendee: typeof registration.attendees[number]) => `${attendee.firstName} ${attendee.lastName}`.trim();
+  const guestName = primary ? fullName(primary) : "Primary guest unavailable";
+  const statusLabel = registration.status === "NOT_REQUIRED" ? "Not required" : registration.status[0] + registration.status.slice(1).toLowerCase();
+  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{primary ? guestName.split(" ").map((p) => p[0]).join("") : "?"}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guestName}</h1><p>Submitted {formatDate(registration.createdAt)} · {event.title}</p></div><StatusBadge status={statusLabel} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={primary?.email ?? ""} /><DetailRow label="Phone number" value={primary?.phone ?? ""} /><DetailRow label="Relationship" value={registration.relationshipToGraduate ?? ""} /><DetailRow label="Attendance" value={registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"} /><DetailRow label="Additional guests" value={additional.length ? additional.map(fullName).join(", ") : "None"} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{registration.attendees.length ? registration.attendees.map((attendee) => <div className="detail-person" key={attendee.id}><span className="guest-avatar">{fullName(attendee).split(" ").map((p) => p[0]).join("")}</span><span><b>{fullName(attendee)}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></div>) : <p className="muted-copy">No attendees listed for this registration.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">REGISTRATION STATUS</span><h2>{statusLabel}</h2><p>This RSVP is shown as returned by Gather. This view does not change registration status.</p><DetailRow label="Submitted" value={formatDate(registration.createdAt)} /></aside></div></div>;
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {

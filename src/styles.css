@@ -656,6 +656,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .guest-card-detail { display: flex; justify-content: space-between; gap: 8px; margin-top: 12px; padding: 9px 0; border-top: 1px solid #efeee8; border-bottom: 1px solid #efeee8; color: #878980; font-size: 8px; }
 .guest-card-actions { display: flex; gap: 5px; margin-top: 10px; }
 .guest-card-actions .button { flex: 1; }
+.guest-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.guest-pagination .button { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 520px) { .guest-pagination { flex-wrap: wrap; justify-content: center; } .guest-pagination span { order: -1; width: 100%; text-align: center; } }
 .guest-detail-header { display: flex; align-items: center; gap: 14px; padding: 18px 21px; border: 1px solid #e8e8e0; background: #fffefa; }
 .guest-avatar-xl { width: 54px; height: 54px; font-size: 14px; }
 .guest-detail-header > div:nth-child(2) { flex: 1; }

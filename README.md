@@ -19,10 +19,10 @@ Set `VITE_API_BASE_URL` in `.env.local` to the backend origin (for example `http
 - Public invitation details loaded by the event slug.
 - Graduate overview and six-step event create/edit flow.
 - Saved light and dark themes, with a quick dashboard toggle and appearance settings.
-- Public invitation, RSVP with configurable plus-ones, and confirmation.
+- Public invitation, backend-backed guest RSVP submission with configurable plus-ones, and confirmation.
 - Graduation memories gallery with multi-photo upload, preview, delete, reorder, per-photo publishing, accessible lightbox, individual downloads, and a published-photos ZIP download.
-- Persisted dashboard notifications for new RSVPs and successful guest check-ins.
-- Guest approval/decline, guest details, individual demo tickets, and ticket links.
+- Dashboard notifications are stored locally; they are not connected to backend RSVP or check-in activity.
+- Organiser RSVP registration list and detail are loaded from the authenticated backend API; approval/rejection, demo tickets, and ticket links are not backed by organiser APIs.
 - Camera QR scanning (HTTPS or localhost required by browsers) and manual check-in.
 - Gallery preview, profile, and settings screens.
 
@@ -30,7 +30,7 @@ Set `VITE_API_BASE_URL` in `.env.local` to the backend origin (for example `http
 
 Authentication and event records are read from the backend API. The frontend stores the returned access token in `localStorage`; this allows browser reloads but makes the token accessible to JavaScript, so prevent cross-site scripting and consider an HttpOnly-cookie design for a higher-security deployment.
 
-RSVP submission/management, guest approval, tickets, check-in, notification activity, photo uploads/gallery persistence, profile editing, and password recovery are not connected in this phase. They must not be treated as authoritative server records. Cover images are cached by event slug in the current browser and shown in the owner dashboard, but are not uploaded to server storage and are not available to guests on other devices. End times and gallery edits are also not saved by the current API.
+Public guest RSVP submission and confirmation, plus authenticated organiser RSVP listing and registration detail, are connected to the backend. The organiser RSVP views are read-only and paginated. Guest approval/rejection, ticket issuance/validation, check-in, server-backed notifications, gallery uploads/persistence, profile editing, and password recovery are not connected. Local screens and demo data for these workflows are not authoritative server records. Cover images are cached by event slug in the current browser and shown in the owner dashboard, but are not uploaded to server storage and are not available to guests on other devices. End times and gallery edits are also not saved by the current API.
 
 The backend must be running with CORS configured for the frontend origin. See the backend project README for its local setup.
 

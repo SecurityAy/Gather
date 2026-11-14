@@ -14,15 +14,17 @@
 
 These are local integration checks, not a full automated regression suite or a production deployment test.
 
-## Not connected in this integration
+## RSVP integration status
 
-- Guest RSVP submission and organiser RSVP management.
-- QR ticket issuance, ticket validation, and attendee check-in.
-- Persistent photo gallery management and image uploads.
-- Email verification, password recovery, and profile editing.
-- Event end-time persistence; the backend event model/API does not provide an end-time field.
+- Public guest RSVP submission and confirmation are implemented in the frontend and call the backend public RSVP endpoints. This flow has not been verified against production.
+- Authenticated organiser RSVP listing and registration detail are integrated as read-only views. The list uses backend pagination (20 registrations per page, with backend totals and page count).
+- Guest approval/rejection are not integrated.
+- Ticket issuance/validation and attendee check-in are not integrated.
+- Gallery uploads/persistence and backend-connected notifications are not integrated.
+- Password recovery remains unconnected; email verification and profile editing are also not integrated.
+- Event end-time persistence is unavailable; the backend event model/API does not provide an end-time field.
 
-The existing screens for these workflows remain outside the connected API flow. Their presence in the frontend does not mean the backend persists or processes those actions.
+The organiser RSVP list and detail read backend registrations. Guest approval/rejection, ticketing, and check-in remain local/demo workflows and are not authoritative server records.
 
 ## Production deployment requirements
 
