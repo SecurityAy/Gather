@@ -277,6 +277,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .status-pending i { background: #c4a26b; }
 .status-declined, .status-revoked { color: #9b6b67; background: #f7eeec; }
 .status-declined i, .status-revoked i { background: #ba8279; }
+.status-rejected { color: #9b6b67; background: #f7eeec; }
+.status-rejected i { background: #ba8279; }
 .status-draft, .status-unpublished, .status-archived, .status-private { color: #7d7e78; background: #eeeee9; }
 .status-draft i, .status-unpublished i, .status-archived i, .status-private i { background: #aaaca3; }
 
@@ -673,7 +675,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .detail-actions-panel { position: sticky; top: 76px; }
 .detail-actions-panel h2 { margin: 9px 0 8px; font-family: var(--serif); font-size: 21px; font-weight: 500; }
 .detail-actions-panel p { margin: 0 0 16px; color: #85877f; font-size: 9px; line-height: 1.7; }
-.detail-actions-panel .button + .button { margin-top: 7px; }
+.registration-decision-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
+.registration-decision-actions .button { flex: 1 1 130px; justify-content: center; }
+.registration-decision-actions .button:disabled { opacity: .6; cursor: wait; }
+.decision-feedback { margin: 12px 0 0 !important; padding: 9px 10px; border-radius: 4px; }
+.decision-error { color: #9b5149 !important; background: #faf0ee; }
+.decision-success { color: #5f7454 !important; background: #f1f5ed; }
 
 /* Tickets */
 .ticket-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }

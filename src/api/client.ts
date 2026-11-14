@@ -156,7 +156,7 @@ export interface ApiRsvpConfirmationResponse {
 }
 
 export type ApiOrganiserRsvpAttendanceIntent = "ATTENDING" | "NOT_ATTENDING";
-export type ApiOrganiserRsvpStatus = "PENDING" | "APPROVED" | "DECLINED" | "CANCELLED" | "NOT_REQUIRED";
+export type ApiOrganiserRsvpStatus = "PENDING" | "APPROVED" | "REJECTED" | "DECLINED" | "CANCELLED" | "NOT_REQUIRED";
 export type ApiOrganiserRsvpAttendeeType = "PRIMARY" | "ADDITIONAL";
 
 export interface ApiOrganiserRsvpAttendee {
@@ -408,5 +408,15 @@ export const api = {
   getOrganiserRsvp: (eventId: string, registrationId: string) =>
     request<ApiOrganiserRsvpDetailResponse>(
       `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}`,
+    ),
+  approveOrganiserRsvp: (eventId: string, registrationId: string) =>
+    request<ApiOrganiserRsvpDetailResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}/approve`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  rejectOrganiserRsvp: (eventId: string, registrationId: string) =>
+    request<ApiOrganiserRsvpDetailResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}/reject`,
+      { method: "POST", body: JSON.stringify({}) },
     ),
 };

@@ -1051,7 +1051,7 @@ function GuestManagementPage() {
     return () => { active = false; };
   }, [event?.id, page, reloadCount]);
   if (!event) return <NotFoundPage />;
-  const filters = ["All", "Pending", "Approved", "Declined", "Cancelled", "Not required", "Not attending"];
+  const filters = ["All", "Pending", "Approved", "Rejected", "Cancelled", "Not required", "Not attending"];
   const resultRows = registrations.map((registration) => {
     const primary = registration.attendees.find((attendee) => attendee.attendeeType === "PRIMARY");
     const additional = registration.attendees.filter((attendee) => attendee.attendeeType === "ADDITIONAL");
@@ -1060,17 +1060,17 @@ function GuestManagementPage() {
   });
   const results = resultRows.filter(({ registration, primary, additional, fullName }) => {
     const matchesFilter = filter === "All"
-      || (filter === "Not attending" ? registration.attendanceIntent === "NOT_ATTENDING" : registration.status === filter.toUpperCase().replaceAll(" ", "_"));
+      || (filter === "Not attending" ? registration.attendanceIntent === "NOT_ATTENDING" : filter === "Rejected" ? registration.status === "DECLINED" || registration.status === "REJECTED" : registration.status === filter.toUpperCase().replaceAll(" ", "_"));
     const searchable = [primary ? fullName(primary) : "", primary?.email ?? "", primary?.phone ?? "", registration.relationshipToGraduate ?? "", ...additional.map(fullName)].join(" ").toLowerCase();
     return matchesFilter && searchable.includes(query.trim().toLowerCase());
   });
-  const statusLabel = (status: string) => status === "NOT_REQUIRED" ? "Not required" : status[0] + status.slice(1).toLowerCase();
+  const statusLabel = (status: string) => status === "NOT_REQUIRED" ? "Not required" : status === "DECLINED" || status === "REJECTED" ? "Rejected" : status;
   const dateLabel = (value: string) => formatDate(value, { day: "numeric", month: "short", year: "numeric" });
   const pageCounts = (status: string) => status === "All"
     ? registrations.length
     : status === "Not attending"
       ? registrations.filter((item) => item.attendanceIntent === "NOT_ATTENDING").length
-      : registrations.filter((item) => item.status === status.toUpperCase().replaceAll(" ", "_")).length;
+      : registrations.filter((item) => status === "Rejected" ? item.status === "DECLINED" || item.status === "REJECTED" : item.status === status.toUpperCase().replaceAll(" ", "_")).length;
   return <div className="page-stack">
     <PageTitle eyebrow={event.title.toUpperCase()} title="Your guest list" description="A little hello from everyone who wants to celebrate with you." />
     <div className="guest-summary-grid">{[{ value: pagination.total, label: "Total RSVPs", color: "lavender" }, { value: registrations.length, label: "On this page", color: "peach" }].map((stat) => <div className="guest-summary" key={stat.label}><span className={`summary-dot ${stat.color}`} /><b>{String(stat.value).padStart(2, "0")}</b><small>{stat.label}</small></div>)}</div>
@@ -1091,6 +1091,9 @@ function GuestDetailsPage() {
   const [registration, setRegistration] = useState<ApiOrganiserRsvpRegistration | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
+  const [decisionError, setDecisionError] = useState("");
+  const [decisionMessage, setDecisionMessage] = useState("");
   useEffect(() => {
     if (!event) return;
     let active = true;
@@ -1114,8 +1117,34 @@ function GuestDetailsPage() {
   const additional = registration.attendees.filter((attendee) => attendee.attendeeType === "ADDITIONAL");
   const fullName = (attendee: typeof registration.attendees[number]) => `${attendee.firstName} ${attendee.lastName}`.trim();
   const guestName = primary ? fullName(primary) : "Primary guest unavailable";
-  const statusLabel = registration.status === "NOT_REQUIRED" ? "Not required" : registration.status[0] + registration.status.slice(1).toLowerCase();
-  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{primary ? guestName.split(" ").map((p) => p[0]).join("") : "?"}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guestName}</h1><p>Submitted {formatDate(registration.createdAt)} · {event.title}</p></div><StatusBadge status={statusLabel} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={primary?.email ?? ""} /><DetailRow label="Phone number" value={primary?.phone ?? ""} /><DetailRow label="Relationship" value={registration.relationshipToGraduate ?? ""} /><DetailRow label="Attendance" value={registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"} /><DetailRow label="Additional guests" value={additional.length ? additional.map(fullName).join(", ") : "None"} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{registration.attendees.length ? registration.attendees.map((attendee) => <div className="detail-person" key={attendee.id}><span className="guest-avatar">{fullName(attendee).split(" ").map((p) => p[0]).join("")}</span><span><b>{fullName(attendee)}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></div>) : <p className="muted-copy">No attendees listed for this registration.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">REGISTRATION STATUS</span><h2>{statusLabel}</h2><p>This RSVP is shown as returned by Gather. This view does not change registration status.</p><DetailRow label="Submitted" value={formatDate(registration.createdAt)} /></aside></div></div>;
+  const statusLabel = registration.status === "NOT_REQUIRED" ? "Not required" : registration.status === "DECLINED" || registration.status === "REJECTED" ? "Rejected" : registration.status;
+  const decideRegistration = async (action: "approve" | "reject") => {
+    if (registration.status !== "PENDING" || decision) return;
+    setDecision(action);
+    setDecisionError("");
+    setDecisionMessage("");
+    try {
+      const result = action === "approve"
+        ? await api.approveOrganiserRsvp(event.id, registration.id)
+        : await api.rejectOrganiserRsvp(event.id, registration.id);
+      setRegistration(result.registration);
+      setDecisionMessage(action === "approve" ? "Registration approved." : "Registration rejected.");
+    } catch (reason) {
+      const status = reason instanceof ApiError ? reason.status : 0;
+      setDecisionError(status === 401
+        ? "Your session has expired. Sign in again to update this RSVP."
+        : status === 403
+          ? "You don't have permission to update this registration."
+          : status === 404
+            ? "This event or registration could not be found. Refresh the guest list and try again."
+            : status === 409
+              ? reason instanceof Error ? reason.message : "This registration is no longer pending. Refresh the guest list to see its current status."
+              : reason instanceof Error ? reason.message : "The registration could not be updated. Please try again.");
+    } finally {
+      setDecision(null);
+    }
+  };
+  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{primary ? guestName.split(" ").map((p) => p[0]).join("") : "?"}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guestName}</h1><p>Submitted {formatDate(registration.createdAt)} · {event.title}</p></div><StatusBadge status={statusLabel} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={primary?.email ?? ""} /><DetailRow label="Phone number" value={primary?.phone ?? ""} /><DetailRow label="Relationship" value={registration.relationshipToGraduate ?? ""} /><DetailRow label="Attendance" value={registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"} /><DetailRow label="Additional guests" value={additional.length ? additional.map(fullName).join(", ") : "None"} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{registration.attendees.length ? registration.attendees.map((attendee) => <div className="detail-person" key={attendee.id}><span className="guest-avatar">{fullName(attendee).split(" ").map((p) => p[0]).join("")}</span><span><b>{fullName(attendee)}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></div>) : <p className="muted-copy">No attendees listed for this registration.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">REGISTRATION STATUS</span><h2>{statusLabel}</h2><p>Registration status returned by Gather.</p><DetailRow label="Submitted" value={formatDate(registration.createdAt)} />{decisionError && <p className="decision-feedback decision-error" role="alert">{decisionError}</p>}{decisionMessage && <p className="decision-feedback decision-success" role="status">{decisionMessage}</p>}{registration.status === "PENDING" && <div className="registration-decision-actions">{registration.attendanceIntent === "ATTENDING" && <button className="button button-dark" onClick={() => void decideRegistration("approve")} disabled={decision !== null}>{decision === "approve" ? <><LoaderCircle className="spin" size={15} /> Approving…</> : "Approve registration"}</button>}<button className="button button-outline" onClick={() => void decideRegistration("reject")} disabled={decision !== null}>{decision === "reject" ? <><LoaderCircle className="spin" size={15} /> Rejecting…</> : "Reject registration"}</button></div>}</aside></div></div>;
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
