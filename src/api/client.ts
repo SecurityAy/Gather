@@ -71,6 +71,22 @@ export interface ApiEventInput {
   approvalRequired?: boolean;
 }
 
+export interface ApiEventImageUploadSignatureResponse {
+  upload: {
+    cloud_name: string;
+    api_key: string;
+    timestamp: number;
+    signature: string;
+    folder: string;
+    public_id: string;
+    resource_type: "image";
+    allowed_formats: string;
+    overwrite: boolean;
+    client_max_file_size_bytes: number;
+    expires_at: number;
+  };
+}
+
 export type ApiPublicEvent = Pick<ApiEvent,
   | "title"
   | "slug"
@@ -269,6 +285,89 @@ export const api = {
       `/api/events?page=${page}&pageSize=${pageSize}`,
     ),
   getEvent: (id: string) => request<{ event: ApiEvent }>(`/api/events/${encodeURIComponent(id)}`),
+  uploadEventCoverImage: async (eventId: string, file: File) => {
+    const { upload } = await request<ApiEventImageUploadSignatureResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/image-upload-signature`,
+      { method: "POST" },
+    );
+
+    const extension = file.name.split(".").pop()?.toLowerCase() || "";
+    const mimeByExtension: Record<string, string> = {
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      png: "image/png",
+      webp: "image/webp",
+    };
+    const allowedFormats = typeof upload.allowed_formats === "string"
+      ? upload.allowed_formats.split(",").map((format) => format.trim().toLowerCase())
+      : [];
+    if (!mimeByExtension[extension] || !allowedFormats.includes(extension) || file.type.toLowerCase() !== mimeByExtension[extension]) {
+      throw new ApiError("Choose a JPG, PNG, or WebP image allowed for this event.", 400);
+    }
+    if (!Number.isFinite(upload.client_max_file_size_bytes) || upload.client_max_file_size_bytes <= 0 || file.size > upload.client_max_file_size_bytes) {
+      const limitMiB = Number.isFinite(upload.client_max_file_size_bytes) && upload.client_max_file_size_bytes > 0
+        ? (upload.client_max_file_size_bytes / (1024 * 1024)).toFixed(0)
+        : "the allowed";
+      throw new ApiError(`Choose an image smaller than ${limitMiB} MiB.`, 413);
+    }
+    if (upload.expires_at <= Math.floor(Date.now() / 1000)) {
+      throw new ApiError("The image upload authorization expired. Please try again.", 401);
+    }
+    if (!/^[a-zA-Z0-9_-]+$/.test(upload.cloud_name) || upload.resource_type !== "image"
+      || !upload.api_key || !upload.signature || !upload.folder || !upload.public_id
+      || !Number.isFinite(upload.timestamp) || typeof upload.overwrite !== "boolean") {
+      throw new ApiError("Gather returned invalid image upload settings.", 500);
+    }
+
+    const body = new FormData();
+    body.set("file", file);
+    body.set("api_key", upload.api_key);
+    body.set("timestamp", String(upload.timestamp));
+    body.set("signature", upload.signature);
+    body.set("folder", upload.folder);
+    body.set("public_id", upload.public_id);
+    body.set("allowed_formats", upload.allowed_formats);
+    body.set("overwrite", String(upload.overwrite));
+
+    let response: Response;
+    try {
+      response = await fetch(`https://api.cloudinary.com/v1_1/${upload.cloud_name}/${upload.resource_type}/upload`, {
+        method: "POST",
+        body,
+      });
+    } catch {
+      throw new ApiError("Could not reach image storage. Check your connection and try again.", 0);
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    if (!response.ok) {
+      const cloudinaryError = typeof payload === "object" && payload !== null && "error" in payload
+        ? (payload as { error?: { message?: unknown } }).error?.message
+        : undefined;
+      throw new ApiError(typeof cloudinaryError === "string" ? cloudinaryError : "Image upload failed. Please try again.", response.status);
+    }
+
+    const secureUrl = typeof payload === "object" && payload !== null && "secure_url" in payload
+      ? (payload as { secure_url?: unknown }).secure_url
+      : undefined;
+    let isHttps = false;
+    if (typeof secureUrl === "string") {
+      try {
+        isHttps = new URL(secureUrl).protocol === "https:";
+      } catch {
+        isHttps = false;
+      }
+    }
+    if (typeof secureUrl !== "string" || !isHttps) {
+      throw new ApiError("Image storage did not return a secure image URL.", 502);
+    }
+    return secureUrl;
+  },
   createEvent: (input: ApiEventInput) =>
     request<{ event: ApiEvent }>("/api/events", { method: "POST", body: JSON.stringify(input) }),
   updateEvent: (id: string, input: Partial<ApiEventInput>) =>

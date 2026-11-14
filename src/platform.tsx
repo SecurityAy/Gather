@@ -253,7 +253,7 @@ function localDateTime(value: string | null, timeZone: string | null) {
 }
 
 export function eventFromApi(event: ApiEvent): EventRecord {
-  const coverImage = getLocalCoverImage(event.slug) || event.coverImageUrl || undefined;
+  const coverImage = event.coverImageUrl || getLocalCoverImage(event.slug) || event.graduateImageUrl || undefined;
   return {
     id: event.id,
     slug: event.slug,
@@ -285,7 +285,7 @@ export function eventFromApi(event: ApiEvent): EventRecord {
 }
 
 export function publicEventFromApi(event: ApiPublicEvent): EventRecord {
-  const coverImage = getLocalCoverImage(event.slug) || event.coverImageUrl || undefined;
+  const coverImage = event.coverImageUrl || getLocalCoverImage(event.slug) || event.graduateImageUrl || undefined;
   return {
     id: event.slug,
     slug: event.slug,
