@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api/client";
-import type { ApiEvent, ApiPublicEvent, ApiUser } from "./api/client";
+import type { ApiAttendeeListResponse, ApiCheckInResult, ApiEvent, ApiPublicEvent, ApiUser } from "./api/client";
 
 export type EventStatus = "Draft" | "Published" | "Unpublished" | "Cancelled" | "Completed" | "Archived";
 export type GuestStatus = "Pending" | "Approved" | "Declined";
@@ -30,6 +30,9 @@ export interface EventRecord {
   instructions: string;
   rsvpDeadline: string;
   additionalLimit: number;
+  maxGuestCapacity: number | null;
+  reservedGuestCount: number;
+  availableGuestCount: number | null;
   personalMessage: string;
   status: EventStatus;
   accent: string;
@@ -38,6 +41,7 @@ export interface EventRecord {
   registrationCount?: number;
   pendingRegistrationCount?: number;
   approvedAttendeeCount?: number;
+  hasReserved?: boolean;
 }
 
 export interface GuestRecord {
@@ -126,6 +130,9 @@ function initialStore(): DemoStore {
     instructions: "Garden entrance. Look for the little gold sign.",
     rsvpDeadline,
     additionalLimit: 2,
+maxGuestCapacity: null,
+reservedGuestCount: 0,
+availableGuestCount: null,
     personalMessage: "I couldn't have made it here without the people I love. Come celebrate this next chapter with me.",
     status: "Published",
     accent: "#b18a55",
@@ -233,7 +240,7 @@ function statusFromApi(status: ApiEvent["eventStatus"]): EventStatus {
   }
 }
 
-function localDateTime(value: string | null, timeZone: string | null) {
+export function localDateTime(value: string | null, timeZone: string | null) {
   if (!value) return "";
   try {
     const parts = new Intl.DateTimeFormat("en-CA", {
@@ -273,6 +280,11 @@ export function eventFromApi(event: ApiEvent): EventRecord {
     instructions: event.venueInstructions ?? "",
     rsvpDeadline: event.rsvpDeadline?.slice(0, 10) ?? "",
     additionalLimit: event.additionalGuestLimit ?? 0,
+    maxGuestCapacity: event.maxGuestCapacity ?? null,
+    reservedGuestCount: event.reservedGuestCount ?? 0,
+    availableGuestCount: event.availableGuestCount ?? (event.maxGuestCapacity == null
+      ? null
+      : Math.max(0, event.maxGuestCapacity - (event.reservedGuestCount ?? 0))),
     personalMessage: event.personalMessage ?? "",
     status: statusFromApi(event.eventStatus),
     accent: "#b18a55",
@@ -305,11 +317,17 @@ export function publicEventFromApi(event: ApiPublicEvent): EventRecord {
     instructions: event.venueInstructions ?? "",
     rsvpDeadline: event.rsvpDeadline?.slice(0, 10) ?? "",
     additionalLimit: event.additionalGuestLimit ?? 0,
+    maxGuestCapacity: event.maxGuestCapacity ?? null,
+    reservedGuestCount: event.reservedGuestCount ?? 0,
+    availableGuestCount: event.availableGuestCount ?? (event.maxGuestCapacity == null
+      ? null
+      : Math.max(0, event.maxGuestCapacity - (event.reservedGuestCount ?? 0))),
     personalMessage: event.personalMessage ?? "",
     status: "Published",
     accent: "#b18a55",
     ...(coverImage ? { coverImage } : {}),
     galleryImages: [],
+    hasReserved: event.hasReserved ?? false,
   };
 }
 
@@ -385,6 +403,7 @@ function eventToApi(event: EventRecord) {
     coverImageUrl: coverImageUrl ?? null,
     rsvpDeadline: dateToApi(event.rsvpDeadline, event.timezone, true),
     additionalGuestLimit: event.additionalLimit,
+    maxGuestCapacity: event.maxGuestCapacity,
     approvalRequired: true,
   };
 }
@@ -411,9 +430,13 @@ interface PlatformContextValue {
   updateGuestStatus: (id: string, status: GuestStatus) => void;
   addGuest: (guest: Omit<GuestRecord, "id" | "submittedAt" | "checkedIn">) => GuestRecord;
   checkIn: (guestId: string, attendeeName: string) => boolean;
+  checkInByTicket: (eventId: string, qrToken: string) => Promise<ApiCheckInResult>;
+  loadAttendees: (eventId: string, page?: number, pageSize?: number) => Promise<ApiAttendeeListResponse>;
+  issueTickets: (eventId: string) => Promise<{ tickets: Array<{ attendeeId: string; ticketId: string; qrToken: string }>; issuedCount: number }>;
   getEvent: (idOrSlug: string) => EventRecord | undefined;
   getPublishedGallery: (eventId: string) => GalleryImage[];
   getGuests: (eventId: string) => GuestRecord[];
+  getDemoTicket: (token: string) => { event: EventRecord; attendeeName: string; checked: boolean } | null;
   markNotificationRead: (id: string) => void;
   markAllNotificationsRead: () => void;
   notify: (message: string, tone?: "success" | "error") => void;
@@ -452,7 +475,6 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       const result = await api.listEvents();
       const loadedEvents = result.events.map(eventFromApi);
       setEvents(loadedEvents);
-      setStore((current) => ({ ...current, events: loadedEvents, guests: [] }));
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Could not load your events.";
       setEventsError(message);
@@ -620,6 +642,15 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       }, ...current].slice(0, 50));
       return true;
     },
+    checkInByTicket: async (eventId, qrToken) => {
+      return await api.checkInTicket(eventId, qrToken);
+    },
+    loadAttendees: async (eventId, page = 1, pageSize = 20) => {
+      return await api.listEventAttendees(eventId, page, pageSize);
+    },
+    issueTickets: async (eventId) => {
+      return await api.issueEventTickets(eventId);
+    },
     getEvent: (idOrSlug) => events.find((event) => event.id === idOrSlug || event.slug === idOrSlug),
     getPublishedGallery: (eventId) => {
       const event = events.find((item) => item.id === eventId);
@@ -627,6 +658,17 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       return (event.galleryImages || []).filter((image) => image.published).map(({ id, src }) => ({ id, src, published: true }));
     },
     getGuests: (eventId) => store.guests.filter((guest) => guest.eventId === eventId),
+    getDemoTicket: (token) => {
+      if (user !== null || !token) return null;
+      const match = store.guests.flatMap((guest) => {
+        const event = store.events.find((item) => item.id === guest.eventId);
+        if (!event || guest.status !== "Approved") return [];
+        return [guest.name, ...guest.additionalGuests]
+          .filter((name) => getDemoTicketToken(guest, name) === token)
+          .map((name) => ({ event, attendeeName: name, checked: guest.checkedIn.includes(name) }));
+      })[0];
+      return match ?? null;
+    },
     markNotificationRead: (id) => setNotifications((current) => current.map((item) => item.id === id ? { ...item, read: true } : item)),
     markAllNotificationsRead: () => setNotifications((current) => current.map((item) => ({ ...item, read: true }))),
     notify: (message, tone = "success") => {

@@ -1,6 +1,7 @@
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
 const apiBaseUrl = (configuredBaseUrl || (import.meta.env.DEV ? "http://localhost:4000" : "")).replace(/\/+$/, "");
 const TOKEN_KEY = "gather.access-token";
+const DEVICE_ID_KEY = "gather.device-id";
 
 export interface ApiUser {
   id: string;
@@ -36,6 +37,9 @@ export interface ApiEvent {
   coverImageUrl: string | null;
   rsvpDeadline: string | null;
   additionalGuestLimit: number | null;
+  maxGuestCapacity?: number | null;
+  reservedGuestCount?: number;
+  availableGuestCount?: number | null;
   approvalRequired: boolean;
   eventStatus: "DRAFT" | "PUBLISHED" | "UNPUBLISHED" | "CANCELLED" | "COMPLETED";
   publishedAt: string | null;
@@ -68,6 +72,7 @@ export interface ApiEventInput {
   coverImageUrl?: string | null;
   rsvpDeadline?: string | null;
   additionalGuestLimit?: number | null;
+  maxGuestCapacity?: number | null;
   approvalRequired?: boolean;
 }
 
@@ -107,7 +112,12 @@ export type ApiPublicEvent = Pick<ApiEvent,
   | "coverImageUrl"
   | "rsvpDeadline"
   | "additionalGuestLimit"
->;
+  | "maxGuestCapacity"
+  | "reservedGuestCount"
+  | "availableGuestCount"
+> & {
+  hasReserved?: boolean;
+};
 
 export interface ApiRsvpSubmissionInput {
   primaryGuestName: string;
@@ -190,8 +200,15 @@ export interface ApiOrganiserRsvpListResponse {
   pagination: ApiOrganiserRsvpPagination;
 }
 
+export interface ApiIssuedTicket {
+  attendeeId: string;
+  ticketId: string;
+  qrToken: string;
+}
+
 export interface ApiOrganiserRsvpDetailResponse {
   registration: ApiOrganiserRsvpRegistration;
+  tickets?: ApiIssuedTicket[];
 }
 
 export class ApiError extends Error {
@@ -217,6 +234,35 @@ export function clearAccessToken() {
   localStorage.removeItem(TOKEN_KEY);
 }
 
+let cachedDeviceId: string | null = null;
+
+function createDeviceId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `web-${crypto.randomUUID()}`;
+  }
+  return `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function getDeviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+  try {
+    const stored = localStorage.getItem(DEVICE_ID_KEY);
+    if (stored && /^[A-Za-z0-9._:-]{8,128}$/.test(stored)) {
+      cachedDeviceId = stored;
+      return stored;
+    }
+  } catch {
+    // localStorage may be restricted
+  }
+  cachedDeviceId = createDeviceId();
+  try {
+    localStorage.setItem(DEVICE_ID_KEY, cachedDeviceId);
+  } catch {
+    // localStorage may be restricted
+  }
+  return cachedDeviceId;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!apiBaseUrl) {
     throw new ApiError("The API URL is not configured. Set VITE_API_BASE_URL and rebuild the frontend.", 0);
@@ -226,12 +272,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body !== undefined) headers.set("Content-Type", "application/json");
   const token = getAccessToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  headers.set("x-device-id", getDeviceId());
 
   let response: Response;
   try {
     response = await fetch(`${apiBaseUrl}${path}`, {
       ...init,
       headers,
+      credentials: "include",
       cache: init.cache ?? "no-store",
     });
   } catch {
@@ -419,4 +467,54 @@ export const api = {
       `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}/reject`,
       { method: "POST", body: JSON.stringify({}) },
     ),
+  issueEventTickets: (eventId: string) =>
+    request<{ tickets: Array<{ attendeeId: string; ticketId: string; qrToken: string }>; issuedCount: number }>(
+      `/api/events/${encodeURIComponent(eventId)}/tickets/issue`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  listEventAttendees: (eventId: string, page = 1, pageSize = 50) =>
+    request<ApiAttendeeListResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/attendees?page=${page}&pageSize=${pageSize}`,
+    ),
+  checkInTicket: (eventId: string, qrToken: string) =>
+    request<ApiCheckInResult>(
+      `/api/tickets/checkin`,
+      {
+        method: "POST",
+        body: JSON.stringify({ eventId, qrToken }),
+      },
+    ),
 };
+
+export interface ApiAttendee {
+  id: string;
+  firstName: string;
+  lastName: string;
+  attendeeType: "PRIMARY" | "ADDITIONAL";
+  attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
+  registrationStatus: "PENDING" | "APPROVED" | "DECLINED" | "REJECTED" | "CANCELLED" | "NOT_REQUIRED";
+  hasTicket: boolean;
+  checkedIn: boolean;
+  checkedInAt: string | null;
+}
+
+export interface ApiAttendeeListResponse {
+  attendees: ApiAttendee[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+export interface ApiCheckInResult {
+  message: string;
+  attendee: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    attendeeType: "PRIMARY" | "ADDITIONAL";
+  };
+  checkedInAt: string;
+}

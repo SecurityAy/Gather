@@ -11,12 +11,12 @@ import {
 import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import JSZip from "jszip";
-import { formatDate, formatTime, getDemoTicketToken, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
-import type { EventRecord, GalleryImage, GuestRecord } from "./platform";
+import { formatDate, formatTime, localDateTime, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
+import type { EventRecord, GalleryImage } from "./platform";
 import { api, ApiError } from "./api/client";
-import type { ApiOrganiserRsvpRegistration, ApiRsvpConfirmationResponse } from "./api/client";
+import type { ApiAttendee, ApiOrganiserRsvpRegistration, ApiRsvpConfirmationResponse } from "./api/client";
+import { readRsvpRecord, readRsvpToken, saveRsvpRecord } from "./rsvpStorage";
 
-const ticketToken = (guest: GuestRecord, attendeeName: string) => getDemoTicketToken(guest, attendeeName);
 const Scanner = lazy(() => import("./Scanner"));
 type Theme = "light" | "dark";
 const ThemeContext = createContext<{ theme: Theme; setTheme: (theme: Theme) => void } | null>(null);
@@ -317,7 +317,7 @@ function ResetPasswordPage() {
 }
 
 function DashboardLayout() {
-  const { events, guests, signOut, user } = usePlatform();
+  const { events, signOut, user } = usePlatform();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
@@ -325,7 +325,7 @@ function DashboardLayout() {
   const eventId = location.pathname.match(/\/events\/([^/]+)/)?.[1];
   const activeEvent = events.find((event) => event.id === eventId) || events[0];
   const base = activeEvent ? `/dashboard/events/${activeEvent.id}` : "/dashboard/events";
-  const pendingCount = activeEvent ? guests.filter((guest) => guest.eventId === activeEvent.id && guest.status === "Pending").length : 0;
+  const pendingCount = activeEvent ? activeEvent.pendingRegistrationCount ?? 0 : 0;
   const displayName = user ? `${user.firstName} ${user.lastName}` : "Gather";
   const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "G";
   const mainItems = [
@@ -468,11 +468,13 @@ function EventWizard() {
   const [pendingCoverUrl, setPendingCoverUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [loadingEvent, setLoadingEvent] = useState(Boolean(eventId));
+  const [capacityInput, setCapacityInput] = useState(() => String(existing?.maxGuestCapacity ?? 100));
+  const [unlimitedCapacity, setUnlimitedCapacity] = useState(() => existing?.maxGuestCapacity == null);
   const [form, setForm] = useState<EventRecord>(() => existing || ({
     id: `event-${crypto.randomUUID()}`, slug: "", title: "", category: "", description: "",
     graduateName: "Amara Okafor", institution: "", faculty: "", department: "", qualification: "",
     startAt: "", endAt: "", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Africa/Lagos",
-    venue: "", address: "", instructions: "", rsvpDeadline: "", additionalLimit: 1,
+    venue: "", address: "", instructions: "", rsvpDeadline: "", additionalLimit: 1, maxGuestCapacity: null, reservedGuestCount: 0, availableGuestCount: null,
     personalMessage: "", status: "Draft", accent: "#b18a55",
   }));
   useEffect(() => {
@@ -483,7 +485,15 @@ function EventWizard() {
     let active = true;
     setLoadingEvent(true);
     void refreshEvent(eventId).then((loadedEvent) => {
-      if (active) setForm(loadedEvent);
+      if (active) {
+        setForm({
+          ...loadedEvent,
+          startAt: localDateTime(loadedEvent.startAt, loadedEvent.timezone),
+          endAt: localDateTime(loadedEvent.endAt, loadedEvent.timezone),
+        });
+        setCapacityInput(String(loadedEvent.maxGuestCapacity ?? 100));
+        setUnlimitedCapacity(loadedEvent.maxGuestCapacity == null);
+      }
     }).catch((reason) => {
       if (active) setError(reason instanceof Error ? reason.message : "The event could not be loaded.");
     }).finally(() => {
@@ -491,7 +501,8 @@ function EventWizard() {
     });
     return () => { active = false; };
   }, [eventId]);
-  const set = (key: keyof EventRecord, value: string | number) => setForm((current) => ({ ...current, [key]: value }));
+  const set = (key: keyof EventRecord, value: string | number | null) => setForm((current) => ({ ...current, [key]: value }));
+  const capacityInputIsValid = () => /^\d+$/.test(capacityInput.trim()) && Number.isSafeInteger(Number(capacityInput));
   const changeStep = (nextStep: number) => {
     if (nextStep === step) return;
     setStepDirection(nextStep > step ? "forward" : "backward");
@@ -504,6 +515,7 @@ function EventWizard() {
     if (step === 2 && form.endAt && new Date(form.endAt) < new Date(form.startAt)) return "The end time should be after the start time.";
     if (step === 3 && !form.rsvpDeadline) return "Choose an RSVP deadline to continue.";
     if (step === 3 && form.startAt && new Date(`${form.rsvpDeadline}T23:59:59`) > new Date(form.startAt)) return "Your RSVP deadline should be before the event starts.";
+    if (step === 3 && !unlimitedCapacity && !capacityInputIsValid()) return "Enter a whole-number guest capacity of zero or more, or choose unlimited.";
     return "";
   };
   const goNext = () => {
@@ -513,10 +525,14 @@ function EventWizard() {
     changeStep(Math.min(step + 1, wizardLabels.length - 1));
   };
   const persist = async (publish: boolean) => {
+    if (!unlimitedCapacity && !capacityInputIsValid()) {
+      setError("Enter a whole-number guest capacity of zero or more, or choose unlimited.");
+      return;
+    }
     setSaving(true);
     setError("");
     try {
-      let saved = await saveEvent({ ...form, coverImage: pendingCoverUrl || form.coverImage, slug: form.slug || slugify(form.title) });
+      let saved = await saveEvent({ ...form, maxGuestCapacity: unlimitedCapacity ? null : Number(capacityInput), coverImage: pendingCoverUrl || form.coverImage, slug: form.slug || slugify(form.title) });
       setForm((current) => ({ ...current, id: saved.id, slug: saved.slug }));
       if (pendingCoverUrl) setPendingCoverUrl("");
       if (selectedImage && !pendingCoverUrl) {
@@ -580,9 +596,10 @@ function EventWizard() {
       {step === 3 && <div className="form-grid"><div className="field field-span"><label htmlFor="rsvpDeadline">Please reply by <span className="required-star">*</span></label><input id="rsvpDeadline" type="date" value={form.rsvpDeadline} onChange={(e) => set("rsvpDeadline", e.target.value)} /></div><div className="field field-span"><label htmlFor="additionalLimit">Additional guests per invitation</label><div className="limit-select"><button type="button" onClick={() => set("additionalLimit", Math.max(0, form.additionalLimit - 1))} aria-label="Remove one additional guest">−</button><span><b>{form.additionalLimit}</b><small>extra {form.additionalLimit === 1 ? "guest" : "guests"} allowed</small></span><button type="button" onClick={() => set("additionalLimit", Math.min(3, form.additionalLimit + 1))} aria-label="Add one additional guest">+</button></div><span className="field-foot">Your guests can bring themselves plus up to {form.additionalLimit} additional people.</span></div><div className="approval-note"><ShieldCheck size={17} /><span><b>You'll review every RSVP.</b><small>Guests get their tickets after you approve their group.</small></span></div></div>}
       {step === 4 && <div className="form-grid"><div className="field field-span"><label htmlFor="personalMessage">A personal note for your guests</label><textarea id="personalMessage" rows={4} value={form.personalMessage} onChange={(e) => set("personalMessage", e.target.value)} placeholder="I couldn't have made it here without the people I love…" /><span className="field-foot">A few words from you make it feel extra special.</span></div><div className="field field-span"><label>Cover image <span className="optional-label">OPTIONAL</span></label>{(selectedImagePreview || form.coverImage) ? <div className="upload-preview" style={{ backgroundImage: `url(${selectedImagePreview || form.coverImage})` }}><button type="button" disabled={saving || Boolean(pendingCoverUrl)} onClick={() => { if (selectedImage) { setSelectedImage(null); setSelectedImagePreview(""); } else { setForm((current) => ({ ...current, coverImage: "" })); } }} aria-label="Remove cover image"><X size={15} /></button></div> : <label className="upload-zone"><ImagePlus size={22} /><b>{imageProgress !== null ? "Preparing your image…" : saving ? "Uploading your image…" : "Choose a cover image"}</b><span>{imageProgress !== null ? `${imageProgress}% ready` : "JPG, PNG, or WebP · up to 5 MiB"}</span><input type="file" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" disabled={imageProgress !== null || saving} onChange={(e) => handleImage(e.target.files?.[0])} /></label>}<span className="field-foot cover-storage-note">Your cover is uploaded to shared storage when you save, then appears on your invitation link.</span>{saving && selectedImage && <span className="field-foot" role="status">Saving the event and uploading your photo…</span>}{pendingCoverUrl && <span className="field-foot" role="status">Your photo uploaded. Save again to retry linking it to this event.</span>}</div><div className="field field-span"><PhotoGalleryEditor photos={form.galleryImages || []} onChange={(galleryImages) => setForm((current) => ({ ...current, galleryImages }))} /><span className="field-foot">Only photos you mark as published appear on your public invitation.</span></div><div className="field field-span"><label>Invitation accent</label><div className="accent-picker">{["#b18a55", "#71826b", "#9d7580", "#64748b", "#292d28"].map((color) => <button type="button" key={color} style={{ background: color }} className={form.accent === color ? "accent-selected" : ""} onClick={() => set("accent", color)} aria-label={`Choose accent ${color}`} />)}<span>Keep it warm, or choose a shade that feels like you.</span></div></div></div>}
       {step === 5 && <InvitationMiniPreview event={{ ...form, coverImage: selectedImagePreview || form.coverImage }} />}
+      {step === 3 && <div className="form-grid capacity-wizard-fields"><div className="field field-span"><label htmlFor="capacity-mode">Event guest capacity</label><select id="capacity-mode" value={unlimitedCapacity ? "unlimited" : "limited"} onChange={(e) => { const isUnlimited = e.target.value === "unlimited"; setUnlimitedCapacity(isUnlimited); if (isUnlimited) setForm((current) => ({ ...current, maxGuestCapacity: null })); else { const nextCapacity = capacityInputIsValid() ? Number(capacityInput) : 100; setCapacityInput(String(nextCapacity)); setForm((current) => ({ ...current, maxGuestCapacity: nextCapacity })); } }}><option value="unlimited">Unlimited capacity</option><option value="limited">Set a maximum</option></select>{!unlimitedCapacity ? <div className="field capacity-number-field"><label htmlFor="max-guest-capacity">Maximum number of guests</label><input id="max-guest-capacity" type="number" min="0" step="1" inputMode="numeric" value={capacityInput} onChange={(e) => { const nextValue = e.target.value; setCapacityInput(nextValue); if (/^\d+$/.test(nextValue) && Number.isSafeInteger(Number(nextValue))) setForm((current) => ({ ...current, maxGuestCapacity: Number(nextValue) })); }} aria-describedby="capacity-help" /><span id="capacity-help" className="field-foot">Counts the primary guest and every additional guest. Enter 0 to close attending RSVPs.</span></div> : <span className="field-foot">There is no event-wide limit on attending guests.</span>}</div></div>}
       </div>
       {error && <div className="inline-error wizard-error" role="alert"><XCircle size={16} />{error}</div>}
-      <div className="wizard-footer"><button className="button button-outline" disabled={saving} onClick={() => step === 0 ? navigate("/dashboard/events") : changeStep(step - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" disabled={saving} onClick={() => void persist(false)}>{saving ? "Saving…" : "Save as draft"}</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" disabled={saving} onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" disabled={saving} onClick={() => void persist(true)}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <><Sparkles size={15} /> Publish event</>}</button>}</div></div>
+      <div className="wizard-footer"><button className="button button-outline" disabled={saving} onClick={() => step === 0 ? navigate("/dashboard/events") : changeStep(step - 1)}>{step === 0 ? <ArrowLeft size={15} /> : <ChevronLeft size={16} />}{step === 0 ? "Cancel" : "Back"}</button><div><button className="button button-quiet" disabled={saving} onClick={() => void persist(false)}>{saving ? "Saving…" : existing ? "Save changes" : "Save as draft"}</button>{step < wizardLabels.length - 1 ? <button className="button button-dark" disabled={saving} onClick={goNext}>Continue <ArrowRight size={15} /></button> : <button className="button button-dark" disabled={saving} onClick={() => void persist(true)}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <><Sparkles size={15} /> {existing?.status === "Published" ? "Save changes" : "Publish event"}</>}</button>}</div></div>
     </div><aside className="wizard-aside"><div className="wizard-aside-art"><span>✳</span><div className="aside-mini-card"><small>YOU'RE INVITED</small><b>{form.title || "Your celebration"}</b><i>{form.graduateName}</i><span className="aside-mini-line" /><small>{form.startAt ? formatDate(form.startAt, { day: "numeric", month: "long", year: "numeric" }).toUpperCase() : "YOUR SPECIAL DAY"} · LAGOS</small></div></div><div className="wizard-tip"><Sparkles size={16} /><span><b>A little note</b><small>You can edit everything later. Your invitation isn't shared until you publish it.</small></span></div><div className="wizard-help"><CircleHelp size={16} /><span>Need inspiration?</span><a href="#preview" onClick={(event) => { event.preventDefault(); changeStep(5); }}>See your invitation preview</a></div></aside></div>
   </div>;
 }
@@ -620,16 +637,19 @@ function PublicEventPage() {
   if (loading) return <div className="simple-auth"><div className="auth-form-wrap"><LoaderCircle className="spin" size={24} /><p>Opening your invitation…</p></div></div>;
   if (notFound) return <UnavailablePage />;
   if (error || !event) return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>couldn't load.</em></h1><p>{error || "Please check your connection and try again."}</p><button className="button button-dark" onClick={() => window.location.reload()}>Try again <ArrowRight size={16} /></button></div></div>;
+  const remainingSpaces = event.maxGuestCapacity === null ? null : event.availableGuestCount;
+  const capacityFull = event.maxGuestCapacity !== null && remainingSpaces === 0;
   const gallery = getPublishedGallery(event.id);
+  const alreadyReserved = event.hasReserved || Boolean(readRsvpToken(event.slug));
   return <div className="invitation-page" id="top"><header className="invitation-nav"><Brand /><span>AN INVITATION TO CELEBRATE</span><Link to="/" className="invitation-nav-link">Made with <Heart size={13} /> Gather</Link></header><main><section className={`invitation-hero${event.coverImage ? " has-cover" : ""}`} style={{ borderColor: `${event.accent}55`, backgroundImage: event.coverImage ? `linear-gradient(rgba(247,246,242,.06), rgba(247,246,242,.06)), url(${event.coverImage})` : undefined, backgroundSize: "cover", backgroundPosition: "center" }}><div className="invitation-hero-texture" style={{ backgroundColor: `${event.accent}18` }} /><div className="invitation-hero-content"><span className="invitation-kicker">WITH JOY IN OUR HEARTS</span><span className="invitation-monogram" style={{ color: event.accent }}>{event.graduateName.charAt(0)}</span><span className="invitation-kicker">{event.institution || "A NEW CHAPTER"}</span><h1>{event.title.split(" ").slice(0, -1).join(" ")}<br /><em>{event.title.split(" ").slice(-1)}</em></h1><p className="invitation-byline">A celebration for <b>{event.graduateName}</b></p><div className="invitation-date-line"><span>{formatDate(event.startAt, { day: "numeric", month: "long", year: "numeric" }, event.timezone)}</span><i /> <span>{formatTime(event.startAt, event.timezone)}</span></div><span className="invitation-venue-line"><MapPin size={14} />{event.venue} · {event.address}</span></div><span className="invitation-star star-a">✳</span><span className="invitation-star star-b">✴</span><span className="invitation-side-stamp">A DAY TO REMEMBER · LAGOS</span></section>
       <section className="invitation-details"><div className="invitation-details-copy"><div className="eyebrow"><span className="eyebrow-line" /> A NOTE FROM {event.graduateName.split(" ")[0].toUpperCase()}</div><h2>All the people<br />I love, in <em>one place.</em></h2><p>{event.personalMessage || event.description || "I would love for you to join me as I celebrate this special milestone."}</p><div className="invitation-academic">{[event.faculty, event.department, event.qualification].filter(Boolean).map((text) => <span key={text}>{text}</span>)}</div></div><div className="invitation-date-card"><span className="panel-kicker">SAVE THE DATE</span><b className="date-card-day">{new Date(event.startAt).getDate()}</b><span className="date-card-month">{new Date(event.startAt).toLocaleString("en", { month: "long", year: "numeric" })}</span><span className="date-card-divider" /><div className="date-card-info"><Clock3 size={15} /><span>{formatTime(event.startAt)}{event.endAt ? ` – ${formatTime(event.endAt)}` : ""}</span></div><div className="date-card-info"><MapPin size={15} /><span>{event.venue}<small>{event.address}</small></span></div>{event.instructions && <div className="date-card-instructions">{event.instructions}</div>}</div></section>
       <Countdown startAt={event.startAt} />
       {!!gallery.length && <PublicGallery images={gallery} />}
-      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p></div>{event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs are now closed. We hope to see you next time.</span> : <Link className="button button-dark button-large" to={`/event/${event.slug}/rsvp`}>Save me a seat <ArrowRight size={16} /></Link>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
+      <section className="invitation-rsvp"><div><span className="panel-kicker">IT WOULDN'T BE THE SAME WITHOUT YOU</span><h2>Will you <em>be there?</em></h2><p>Let me know by {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. {event.additionalLimit ? `You're welcome to bring up to ${event.additionalLimit} additional ${event.additionalLimit === 1 ? "guest" : "guests"}.` : ""}</p>{event.maxGuestCapacity !== null && <p className={`capacity-public-note${capacityFull ? " is-full" : ""}`} role={capacityFull ? "status" : undefined}>{capacityFull ? "We've reached our guest capacity. Attending RSVPs are closed, but you can still let us know if you can't make it." : `${remainingSpaces} guest space${remainingSpaces === 1 ? "" : "s"} remaining.`}</p>}</div>{alreadyReserved ? <div className="rsvp-registered"><span className="rsvp-closed"><CheckCircle2 size={15} /> You're already on the list.</span><Link className="button button-outline button-large" to={`/event/${event.slug}/confirmation`}>View my RSVP <ArrowRight size={16} /></Link></div> : event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date() ? <span className="rsvp-closed">RSVPs closed on {formatDate(event.rsvpDeadline, { day: "numeric", month: "long" })}. We hope to see you next time.</span> : <Link className="button button-dark button-large" to={`/event/${event.slug}/rsvp`}>{capacityFull ? "Respond to invitation" : "Save me a seat"} <ArrowRight size={16} /></Link>}</section></main><footer className="invitation-footer"><Brand /><span>Made with love, for the moments that matter.</span><a href="#top">Back to top ↑</a></footer></div>;
 }
 
 function UnavailablePage() {
-  return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>isn't available.</em></h1><p>It may have been unpublished or the link may have changed. Check with the graduate for the latest details.</p><Link to="/" className="button button-dark">Back to Gather <ArrowRight size={16} /></Link></div></div>;
+  return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>isn't available.</em></h1><p>It may not be published yet, may have been unpublished, or the link may have changed. Once the graduate publishes it, this page will show the event details and RSVP form.</p><Link to="/" className="button button-dark">Back to Gather <ArrowRight size={16} /></Link></div></div>;
 }
 
 function Countdown({ startAt }: { startAt: string }) {
@@ -722,6 +742,7 @@ function RsvpPage() {
   const [names, setNames] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [deviceConflict, setDeviceConflict] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -747,8 +768,15 @@ function RsvpPage() {
   if (notFound) return <UnavailablePage />;
   if (loadError || !event) return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> A LITTLE DETOUR</div><h1>This invitation<br /><em>couldn't load.</em></h1><p>{loadError || "Please check your connection and try again."}</p><button className="button button-dark" onClick={() => window.location.reload()}>Try again <ArrowRight size={16} /></button></div></div>;
 
+  const existingToken = readRsvpToken(slug);
+  if (existingToken) return <div className="rsvp-closed-page"><Brand /><div className="simple-auth-card"><div className="auth-icon"><CheckCircle2 size={20} /></div><span className="eyebrow"><span className="eyebrow-line" /> YOU'VE ALREADY REPLIED</span><h1>Your RSVP<br /><em>is already with us.</em></h1><p>This device has already sent an RSVP for {event.title}. You can view your confirmation below or head back to the invitation.</p><Link className="button button-dark" to={`/event/${slug}/confirmation`}>View my RSVP <ArrowRight size={16} /></Link><Link className="back-link" to={`/event/${slug}`}><ArrowLeft size={15} /> Back to invitation</Link></div></div>;
+  if (deviceConflict) return <div className="rsvp-closed-page"><Brand /><div className="simple-auth-card"><div className="auth-icon"><CheckCircle2 size={20} /></div><span className="eyebrow"><span className="eyebrow-line" /> ALREADY RESERVED</span><h1>This device has<br /><em>already replied.</em></h1><p>{deviceConflict}</p>{readRsvpToken(slug) ? <Link className="button button-dark" to={`/event/${slug}/confirmation`}>View my RSVP <ArrowRight size={16} /></Link> : null}<Link className="back-link" to={`/event/${slug}`}><ArrowLeft size={15} /> Back to invitation</Link></div></div>;
   const closed = event.rsvpDeadline && new Date(`${event.rsvpDeadline}T23:59:59`) < new Date();
   if (closed) return <div className="rsvp-closed-page"><Brand /><div className="simple-auth-card"><div className="auth-icon"><Clock3 size={20} /></div><span className="eyebrow"><span className="eyebrow-line" /> RSVP WINDOW CLOSED</span><h1>We wish you<br /><em>could join us.</em></h1><p>RSVPs for {event.title} closed on {formatDate(event.rsvpDeadline)}. Please reach out to {event.graduateName} if you have any questions.</p><Link className="back-link" to={`/event/${slug}`}><ArrowLeft size={15} /> Back to invitation</Link></div></div>;
+  const remainingSpaces = event.maxGuestCapacity === null ? null : event.availableGuestCount;
+  const capacityFull = event.maxGuestCapacity !== null && remainingSpaces === 0;
+  const requestedGuestCount = count + 1;
+  const groupExceedsCapacity = attending === true && remainingSpaces !== null && requestedGuestCount > remainingSpaces;
 
   const handleCount = (value: number) => {
     const safe = Math.min(event.additionalLimit, Math.max(0, value));
@@ -759,6 +787,8 @@ function RsvpPage() {
   const submit = async (formEvent: FormEvent<HTMLFormElement>) => {
     formEvent.preventDefault();
     if (attending === null) { setError("Let us know if you'll be there."); return; }
+    if (attending && capacityFull) { setError("This event has reached capacity. You can still let us know if you can't attend."); return; }
+    if (attending && remainingSpaces !== null && requestedGuestCount > remainingSpaces) { setError(`There ${remainingSpaces === 1 ? "is" : "are"} not enough guest spaces for your group. Reduce the additional guests to continue.`); return; }
     const data = new FormData(formEvent.currentTarget);
     const rawPrimaryName = String(data.get("name") ?? "").trim();
     const primaryParts = rawPrimaryName.split(/\s+/).filter(Boolean);
@@ -804,6 +834,11 @@ function RsvpPage() {
         attendanceIntent: attending ? "ATTENDING" : "NOT_ATTENDING",
         additionalGuestNames: attending ? additionalGuestNames : [],
       });
+      saveRsvpRecord(slug, {
+        token: result.confirmationToken,
+        submittedAt: new Date().toISOString(),
+        attendanceIntent: attending ? "ATTENDING" : "NOT_ATTENDING",
+      });
       try {
         sessionStorage.setItem(`gather.rsvp.${slug}.token`, result.confirmationToken);
       } catch {
@@ -816,7 +851,21 @@ function RsvpPage() {
     } catch (reason) {
       if (reason instanceof ApiError) {
         if (reason.status === 409) {
-          setError(reason.message || "This RSVP conflicts with a recent submission. Please try again.");
+          if (/already been made for this event on this device/i.test(reason.message)) {
+            setDeviceConflict(reason.message);
+            setError("");
+          } else {
+            const capacityConflict = /capacity|spaces?|seats?|guests?/i.test(reason.message);
+            setError(reason.message || (capacityConflict ? "There aren't enough guest spaces for this group." : "This RSVP conflicts with a recent submission. Please try again."));
+            if (capacityConflict) {
+              try {
+                const { event: refreshedEvent } = await api.publicEvent(slug);
+                setEvent(publicEventFromApi(refreshedEvent));
+              } catch {
+                // Keep the capacity error and the guest's entered details available for retry.
+              }
+            }
+          }
         } else if (reason.status === 410) {
           setError("The RSVP deadline has passed and submissions are now closed.");
         } else if (reason.status === 429) {
@@ -838,11 +887,12 @@ function RsvpPage() {
       <div className="field"><label htmlFor="rsvp-name">Your full name <span className="required-star">*</span></label><input id="rsvp-name" name="name" placeholder="As it appears on your ticket" required /></div>
       <div className="form-grid"><div className="field"><label htmlFor="rsvp-email">Email address <span className="required-star">*</span></label><input id="rsvp-email" name="email" type="email" placeholder="you@example.com" required /></div><div className="field"><label htmlFor="rsvp-phone">Phone number <span className="required-star">*</span></label><input id="rsvp-phone" name="phone" type="tel" placeholder="+234 800 000 0000" required /></div></div>
       <div className="field"><label htmlFor="rsvp-relation">How do you know {event.graduateName.split(" ")[0]}? <span className="required-star">*</span></label><select id="rsvp-relation" name="relationship" defaultValue="" required><option value="" disabled>Choose one</option><option>Family</option><option>Friend</option><option>Course mate</option><option>Colleague</option><option>Other</option></select></div>
-      <div className="field"><span className="field-label">Will you be there? <span className="required-star">*</span></span><div className="attendance-options"><button type="button" className={`attendance-option ${attending === true ? "selected" : ""}`} onClick={() => { setAttending(true); setError(""); }}><span className="choice-dot">{attending === true && <i />}</span><span><b>I'd love to</b><small>Count me in</small></span><CheckCircle2 size={18} /></button><button type="button" className={`attendance-option ${attending === false ? "selected" : ""}`} onClick={() => { setAttending(false); setCount(0); setNames([]); setError(""); }}><span className="choice-dot">{attending === false && <i />}</span><span><b>Can't make it</b><small>I'll be there in spirit</small></span><Heart size={17} /></button></div></div>
-      {attending && event.additionalLimit > 0 && <div className="additional-guests"><div className="additional-heading"><span><Users size={16} /><b>Bringing someone along?</b></span><span>UP TO {event.additionalLimit}</span></div><label className="field-label" htmlFor="extra-count">Additional guests</label><div className="guest-count-control"><button type="button" onClick={() => handleCount(count - 1)} aria-label="Remove guest">−</button><b>{count}</b><button type="button" onClick={() => handleCount(count + 1)} disabled={count >= event.additionalLimit} aria-label="Add guest">+</button></div>{names.map((name, index) => <div className="field" key={index}><label htmlFor={`extra-${index}`}>Guest {index + 1} full name <span className="required-star">*</span></label><input id={`extra-${index}`} value={name} onChange={(e) => setNames((current) => current.map((item, i) => i === index ? e.target.value : item))} placeholder="Their full name" required /></div>)}</div>}
+      {event.maxGuestCapacity !== null && <div className={`capacity-rsvp-note${capacityFull || groupExceedsCapacity ? " is-full" : ""}`} role={capacityFull ? "status" : undefined}>{capacityFull ? "This event is full. You can still respond that you can't attend." : groupExceedsCapacity ? `Your group has ${requestedGuestCount} people, but only ${remainingSpaces} spaces remain. Reduce additional guests or choose not attending.` : `${remainingSpaces} guest space${remainingSpaces === 1 ? "" : "s"} remaining. The primary guest and each additional guest use one space.`}</div>}
+      <div className="field"><span className="field-label">Will you be there? <span className="required-star">*</span></span><div className="attendance-options"><button type="button" className={`attendance-option ${attending === true ? "selected" : ""}`} onClick={() => { setAttending(true); setError(""); }} disabled={capacityFull} aria-label={capacityFull ? "Attending is closed because the event is full" : "I would love to attend"}><span className="choice-dot">{attending === true && <i />}</span><span><b>I'd love to</b><small>{capacityFull ? "No spaces remain" : "Count me in"}</small></span><CheckCircle2 size={18} /></button><button type="button" className={`attendance-option ${attending === false ? "selected" : ""}`} onClick={() => { setAttending(false); setCount(0); setNames([]); setError(""); }}><span className="choice-dot">{attending === false && <i />}</span><span><b>Can't make it</b><small>I'll be there in spirit</small></span><Heart size={17} /></button></div></div>
+      {attending && event.additionalLimit > 0 && <div className="additional-guests"><div className="additional-heading"><span><Users size={16} /><b>Bringing someone along?</b></span><span>UP TO {event.additionalLimit}</span></div><label className="field-label" htmlFor="extra-count">Additional guests</label><div className="guest-count-control"><button type="button" onClick={() => handleCount(count - 1)} aria-label="Remove guest">−</button><b>{count}</b><button type="button" onClick={() => handleCount(count + 1)} disabled={count >= event.additionalLimit} aria-label="Add guest">+</button></div>{Array.from({ length: count }, (_, index) => names[index] ?? "").map((name, index) => <div className="field" key={index}><label htmlFor={`extra-${index}`}>Guest {index + 1} full name <span className="required-star">*</span></label><input id={`extra-${index}`} value={name} onChange={(e) => setNames((current) => { const next = [...current]; next[index] = e.target.value; return next; })} placeholder="Their full name" required /></div>)}</div>}
       {error && <div className="inline-error"><XCircle size={16} />{error}</div>}
       <div className="rsvp-security-note"><LockKeyhole size={14} /><span>Your details are only shared with {event.graduateName.split(" ")[0]}.</span></div>
-      <button className="button button-dark button-full button-large" disabled={busy}>{busy ? <><LoaderCircle className="spin" size={17} /> Sending your RSVP…</> : <>Send my RSVP <ArrowRight size={16} /></>}</button>
+      <button className="button button-dark button-full button-large" disabled={busy || (attending === true && (capacityFull || groupExceedsCapacity))}>{busy ? <><LoaderCircle className="spin" size={17} /> Sending your RSVP…</> : <>Send my RSVP <ArrowRight size={16} /></>}</button>
     </form><p className="approval-note-inline"><ShieldCheck size={14} /> Your place is confirmed after {event.graduateName.split(" ")[0]} approves your RSVP.</p></section></main></div>;
 }
 
@@ -852,13 +902,7 @@ function RsvpConfirmation() {
   // const [searchParams] = useSearchParams();
   const stateToken = (location.state as { token?: string } | null)?.token;
   // const queryToken = searchParams.get("token") || undefined;
-  const storedToken = (() => {
-    try {
-      return sessionStorage.getItem(`gather.rsvp.${slug}.token`) || undefined;
-    } catch {
-      return undefined;
-    }
-  })();
+  const storedToken = readRsvpToken(slug) || undefined;
   const token = stateToken || storedToken || "";
 
   const [confirmation, setConfirmation] = useState<ApiRsvpConfirmationResponse["confirmation"] | null>(null);
@@ -881,6 +925,12 @@ function RsvpConfirmation() {
     ]).then(([confResult, publicResult]) => {
       if (!active) return;
       setConfirmation(confResult.confirmation);
+      const existingRecord = readRsvpRecord(slug);
+      saveRsvpRecord(slug, {
+        token,
+        submittedAt: existingRecord?.submittedAt || new Date().toISOString(),
+        attendanceIntent: confResult.confirmation.attendanceIntent,
+      });
       try {
         sessionStorage.setItem(`gather.rsvp.${slug}.token`, token);
       } catch {
@@ -988,6 +1038,12 @@ function EventOverviewPage() {
   const approvedPeople = event.approvedAttendeeCount ?? 0;
   const checked = 0;
   const pending = event.pendingRegistrationCount ?? 0;
+  const capacityLimit = event.maxGuestCapacity;
+  const reservedSpaces = event.reservedGuestCount;
+  const availableSpaces = event.availableGuestCount;
+  const capacityPercent = capacityLimit === null || capacityLimit === 0
+    ? 0
+    : Math.min(100, Math.round((reservedSpaces / capacityLimit) * 100));
   const shareInvitation = async () => {
     const url = `${window.location.origin}/event/${event.slug}`;
     try {
@@ -1008,6 +1064,7 @@ function EventOverviewPage() {
     {justPublished && <div className="confetti-burst" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <span key={index} style={{ left: `${(index * 47 + 7) % 100}%`, animationDelay: `${index % 6 * 70}ms`, backgroundColor: `hsl(${(index * 43) % 360} 55% 65%)` }} />)}</div>}
     <section className={`event-overview-hero${event.coverImage ? " has-cover" : ""}`} aria-label="Event overview"><div className={`event-overview-photo${event.coverImage ? " has-cover" : ""}`}>{event.coverImage ? <img className="event-overview-cover" src={event.coverImage} alt="" aria-hidden="true" /> : <><div className="event-overview-pattern">✳</div><div className="event-hero-monogram">{event.graduateName.charAt(0)}</div></>}</div><div className="event-overview-hero-copy"><div className="event-overview-top"><span className="panel-kicker">YOUR CELEBRATION</span><StatusBadge status={event.status} /></div><h1>{event.title}</h1><p>{event.description || "All the details for your special day."}</p><div className="event-hero-meta"><span><CalendarDays size={15} />{formatDate(event.startAt)}</span><span><MapPin size={15} />{event.venue}</span></div><div className="event-overview-actions"><Link to={`/event/${event.slug}`} target="_blank" rel="noopener noreferrer" className="button button-outline button-sm">Preview invitation <ExternalLink size={14} /></Link><button className="button button-dark button-sm" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/event/${event.slug}`).then(() => notify("Invitation link copied."), () => notify("Couldn't copy the link. You can share the invitation directly.", "error")); }}><Copy size={14} /> Copy invitation link</button><button className="button button-outline button-sm" onClick={shareInvitation}><Share2 size={16} /> Share</button></div></div></section>
     <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: String(checked).padStart(2, "0"), label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
+    <section className="capacity-summary" aria-label="Guest capacity summary"><div className="capacity-summary-heading"><span className="panel-kicker">GUEST CAPACITY</span><strong>{capacityLimit === null ? "Unlimited capacity" : `Maximum capacity: ${capacityLimit}`}</strong></div>{capacityLimit === null ? <p>There is no event-wide limit on attending guests.</p> : <><div className="capacity-progress" role="progressbar" aria-label="Reserved guest capacity" aria-valuemin={0} aria-valuemax={capacityLimit} aria-valuenow={Math.min(reservedSpaces, capacityLimit)}><span style={{ width: `${capacityPercent}%` }} /></div><div className="capacity-summary-metrics"><span>Reserved spaces <b>{reservedSpaces}</b></span><span>Available spaces <b>{availableSpaces ?? 0}</b></span></div></>}</section>
     <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest RSVPs</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} pending.` : "Your RSVP details are ready to view."} text="You can view submitted RSVPs and individual guest details. RSVP approval and rejection aren't available yet." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
   </div>;
 }
@@ -1064,15 +1121,47 @@ function GuestManagementPage() {
     const searchable = [primary ? fullName(primary) : "", primary?.email ?? "", primary?.phone ?? "", registration.relationshipToGraduate ?? "", ...additional.map(fullName)].join(" ").toLowerCase();
     return matchesFilter && searchable.includes(query.trim().toLowerCase());
   });
-  const statusLabel = (status: string) => status === "NOT_REQUIRED" ? "Not required" : status === "DECLINED" || status === "REJECTED" ? "Rejected" : status;
+   const statusLabel = (status: string) => status === "NOT_REQUIRED" ? "Not required" : status === "DECLINED" || status === "REJECTED" ? "Rejected" : status;
   const dateLabel = (value: string) => formatDate(value, { day: "numeric", month: "short", year: "numeric" });
   const pageCounts = (status: string) => status === "All"
     ? registrations.length
     : status === "Not attending"
       ? registrations.filter((item) => item.attendanceIntent === "NOT_ATTENDING").length
       : registrations.filter((item) => status === "Rejected" ? item.status === "DECLINED" || item.status === "REJECTED" : item.status === status.toUpperCase().replaceAll(" ", "_")).length;
+
+  const capacityLimit = event.maxGuestCapacity ?? null;
+  const reservedSpaces = event.reservedGuestCount ?? 0;
+  const availableSpaces = event.availableGuestCount ?? null;
+  const capacityPercent = capacityLimit !== null && capacityLimit > 0
+    ? Math.min(100, (reservedSpaces / capacityLimit) * 100)
+    : 0;
   return <div className="page-stack">
-    <PageTitle eyebrow={event.title.toUpperCase()} title="Your guest list" description="A little hello from everyone who wants to celebrate with you." />
+    <PageTitle eyebrow={event.title.toUpperCase()} title="Your guest list" description="A little hello from everyone who wants to celebrate with you." />    <section className="capacity-summary" aria-label="Guest capacity summary">
+      <div className="capacity-summary-heading">
+        <span className="panel-kicker">GUEST CAPACITY</span>
+        <strong>{capacityLimit === null ? "Unlimited capacity" : `Maximum capacity: ${capacityLimit}`}</strong>
+      </div>
+      {capacityLimit === null ? (
+        <p>There is no event-wide limit on attending guests.</p>
+      ) : (
+        <>
+          <div
+            className="capacity-progress"
+            role="progressbar"
+            aria-label="Reserved guest capacity"
+            aria-valuemin={0}
+            aria-valuemax={capacityLimit}
+            aria-valuenow={Math.min(reservedSpaces, capacityLimit)}
+          >
+            <span style={{ width: `${capacityPercent}%` }} />
+          </div>
+          <div className="capacity-summary-metrics">
+            <span>Reserved spaces <b>{reservedSpaces}</b></span>
+            <span>Available spaces <b>{availableSpaces ?? 0}</b></span>
+          </div>
+        </>
+      )}
+    </section>
     <div className="guest-summary-grid">{[{ value: pagination.total, label: "Total RSVPs", color: "lavender" }, { value: registrations.length, label: "On this page", color: "peach" }].map((stat) => <div className="guest-summary" key={stat.label}><span className={`summary-dot ${stat.color}`} /><b>{String(stat.value).padStart(2, "0")}</b><small>{stat.label}</small></div>)}</div>
     <section className="panel guest-list-panel"><div className="guest-toolbar"><div className="guest-filter-tabs">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}<span>{pageCounts(item)}</span></button>)}</div><div className="guest-search-row"><div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page…" /></div><div className="view-switch"><button aria-label="Table view" className={view === "table" ? "selected" : ""} onClick={() => setView("table")}><ListFilter size={16} /></button><button aria-label="Card view" className={view === "cards" ? "selected" : ""} onClick={() => setView("cards")}><LayoutDashboard size={16} /></button></div></div></div>
       {loading ? <div className="empty-state"><LoaderCircle className="spin" size={22} /><h3>Loading RSVPs</h3><p>Fetching registrations for this event.</p></div>
@@ -1086,7 +1175,7 @@ function GuestManagementPage() {
 
 function GuestDetailsPage() {
   const { eventId = "", guestId = "" } = useParams();
-  const { getEvent } = usePlatform();
+  const { getEvent, loadAttendees, refreshEvent, notify } = usePlatform();
   const event = getEvent(eventId);
   const [registration, setRegistration] = useState<ApiOrganiserRsvpRegistration | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1094,6 +1183,7 @@ function GuestDetailsPage() {
   const [decision, setDecision] = useState<"approve" | "reject" | null>(null);
   const [decisionError, setDecisionError] = useState("");
   const [decisionMessage, setDecisionMessage] = useState("");
+  const [issuedTickets, setIssuedTickets] = useState<Array<{ attendeeId: string; qrToken: string }>>([]);
   useEffect(() => {
     if (!event) return;
     let active = true;
@@ -1110,6 +1200,12 @@ function GuestDetailsPage() {
     });
     return () => { active = false; };
   }, [event?.id, guestId]);
+  useEffect(() => {
+    setIssuedTickets([]);
+    setDecisionMessage("");
+    setDecisionError("");
+    setDecision(null);
+  }, [eventId, guestId]);
   if (!event) return <NotFoundPage />;
   if (loading) return <div className="empty-state"><LoaderCircle className="spin" size={22} /><h3>Loading RSVP details</h3><p>Fetching this registration.</p></div>;
   if (loadError || !registration) return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><EmptyState icon={<XCircle size={22} />} title="RSVP details couldn't load." text={loadError || "This registration could not be found."} /></div>;
@@ -1128,7 +1224,17 @@ function GuestDetailsPage() {
         ? await api.approveOrganiserRsvp(event.id, registration.id)
         : await api.rejectOrganiserRsvp(event.id, registration.id);
       setRegistration(result.registration);
-      setDecisionMessage(action === "approve" ? "Registration approved." : "Registration rejected.");
+      const newTickets = result.tickets ?? [];
+      setIssuedTickets(newTickets);
+      if (action === "approve") {
+        setDecisionMessage(newTickets.length
+          ? `Registration approved. ${newTickets.length} new ticket code${newTickets.length === 1 ? "" : "s"} issued.`
+          : "Registration approved. This guest already had a ticket.");
+      } else {
+        setDecisionMessage("Registration rejected.");
+      }
+      void loadAttendees(event.id, 1, 50).catch(() => undefined);
+      void refreshEvent(event.id).catch(() => undefined);
     } catch (reason) {
       const status = reason instanceof ApiError ? reason.status : 0;
       setDecisionError(status === 401
@@ -1144,7 +1250,17 @@ function GuestDetailsPage() {
       setDecision(null);
     }
   };
-  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{primary ? guestName.split(" ").map((p) => p[0]).join("") : "?"}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guestName}</h1><p>Submitted {formatDate(registration.createdAt)} · {event.title}</p></div><StatusBadge status={statusLabel} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={primary?.email ?? ""} /><DetailRow label="Phone number" value={primary?.phone ?? ""} /><DetailRow label="Relationship" value={registration.relationshipToGraduate ?? ""} /><DetailRow label="Attendance" value={registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"} /><DetailRow label="Additional guests" value={additional.length ? additional.map(fullName).join(", ") : "None"} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{registration.attendees.length ? registration.attendees.map((attendee) => <div className="detail-person" key={attendee.id}><span className="guest-avatar">{fullName(attendee).split(" ").map((p) => p[0]).join("")}</span><span><b>{fullName(attendee)}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></div>) : <p className="muted-copy">No attendees listed for this registration.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">REGISTRATION STATUS</span><h2>{statusLabel}</h2><p>Registration status returned by Gather.</p><DetailRow label="Submitted" value={formatDate(registration.createdAt)} />{decisionError && <p className="decision-feedback decision-error" role="alert">{decisionError}</p>}{decisionMessage && <p className="decision-feedback decision-success" role="status">{decisionMessage}</p>}{registration.status === "PENDING" && <div className="registration-decision-actions">{registration.attendanceIntent === "ATTENDING" && <button className="button button-dark" onClick={() => void decideRegistration("approve")} disabled={decision !== null}>{decision === "approve" ? <><LoaderCircle className="spin" size={15} /> Approving…</> : "Approve registration"}</button>}<button className="button button-outline" onClick={() => void decideRegistration("reject")} disabled={decision !== null}>{decision === "reject" ? <><LoaderCircle className="spin" size={15} /> Rejecting…</> : "Reject registration"}</button></div>}</aside></div></div>;
+  const copyIssuedToken = (token: string, name: string) => {
+    if (!navigator.clipboard) {
+      notify(`Copy this code for ${name}: ${token}`);
+      return;
+    }
+    void navigator.clipboard.writeText(token).then(
+      () => notify(`Code for ${name} copied.`),
+      () => notify(`Could not copy automatically. Code for ${name}: ${token}`, "error"),
+    );
+  };
+  return <div className="page-stack"><Link className="back-link" to={`/dashboard/events/${event.id}/guests`}><ArrowLeft size={15} /> Back to all RSVPs</Link><div className="guest-detail-header"><div><span className="guest-avatar guest-avatar-xl">{primary ? guestName.split(" ").map((p) => p[0]).join("") : "?"}</span></div><div><div className="eyebrow"><span className="eyebrow-line" /> RSVP DETAILS</div><h1>{guestName}</h1><p>Submitted {formatDate(registration.createdAt)} · {event.title}</p></div><StatusBadge status={statusLabel} /></div><div className="guest-detail-grid"><section className="panel detail-panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE ABOUT THEM</span><h2>Guest details</h2></div></div><DetailRow label="Email address" value={primary?.email ?? ""} /><DetailRow label="Phone number" value={primary?.phone ?? ""} /><DetailRow label="Relationship" value={registration.relationshipToGraduate ?? ""} /><DetailRow label="Attendance" value={registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"} /><DetailRow label="Additional guests" value={additional.length ? additional.map(fullName).join(", ") : "None"} /><div className="detail-people"><span className="field-label">ATTENDEES IN THIS GROUP</span>{registration.attendees.length ? registration.attendees.map((attendee) => <div className="detail-person" key={attendee.id}><span className="guest-avatar">{fullName(attendee).split(" ").map((p) => p[0]).join("")}</span><span><b>{fullName(attendee)}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></div>) : <p className="muted-copy">No attendees listed for this registration.</p>}</div></section><aside className="panel detail-actions-panel"><span className="panel-kicker">REGISTRATION STATUS</span><h2>{statusLabel}</h2><p>Registration status returned by Gather.</p><DetailRow label="Submitted" value={formatDate(registration.createdAt)} />{issuedTickets.length > 0 && <div className="issued-token-list detail-issued-tickets"><span className="field-label">NEWLY ISSUED TICKET CODES</span><p className="muted-copy">These codes are only shown once. Copy them now and send them to the guest.</p>{issuedTickets.map((ticket) => { const attendee = registration.attendees.find((item) => item.id === ticket.attendeeId); const name = attendee ? fullName(attendee) : "Guest"; return <div className="issued-token" key={ticket.attendeeId}><span className="guest-avatar">{name.split(" ").map((part) => part[0]).join("")}</span><span className="issued-token-copy"><b>{name}</b><code>{ticket.qrToken}</code></span><button className="button button-outline button-sm" onClick={() => copyIssuedToken(ticket.qrToken, name)}>Copy</button></div>; })}</div>}{decisionError && <p className="decision-feedback decision-error" role="alert">{decisionError}</p>}{decisionMessage && <p className="decision-feedback decision-success" role="status">{decisionMessage}</p>}{registration.status === "PENDING" && <div className="registration-decision-actions">{registration.attendanceIntent === "ATTENDING" && <button className="button button-dark" onClick={() => void decideRegistration("approve")} disabled={decision !== null}>{decision === "approve" ? <><LoaderCircle className="spin" size={15} /> Approving…</> : "Approve registration"}</button>}<button className="button button-outline" onClick={() => void decideRegistration("reject")} disabled={decision !== null}>{decision === "reject" ? <><LoaderCircle className="spin" size={15} /> Rejecting…</> : "Reject registration"}</button></div>}</aside></div></div>;
 }
 
 function DetailRow({ label, value }: { label: string; value: string }) {
@@ -1153,17 +1269,143 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function TicketManagementPage() {
   const { eventId = "" } = useParams();
-  const { getEvent, getGuests } = usePlatform();
+  const { getEvent, loadAttendees, issueTickets, notify } = usePlatform();
   const event = getEvent(eventId);
+  const [page, setPage] = useState(1);
+  const [attendees, setAttendees] = useState<ApiAttendee[]>([]);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [reloadCount, setReloadCount] = useState(0);
+  const [issuing, setIssuing] = useState(false);
+  const [issueError, setIssueError] = useState("");
+  const [issued, setIssued] = useState<Array<{ name: string; token: string }>>([]);
+  const namesRef = useRef<Map<string, string>>(new Map());
+  const pageSize = 20;
+
+  useEffect(() => {
+    if (!event) return;
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    void loadAttendees(event.id, page, pageSize)
+      .then((result) => {
+        if (!active) return;
+        result.attendees.forEach((attendee) => {
+          namesRef.current.set(attendee.id, `${attendee.firstName} ${attendee.lastName}`.trim());
+        });
+        setAttendees(result.attendees);
+        setPagination(result.pagination);
+        if (page > result.pagination.totalPages) setPage(Math.max(1, result.pagination.totalPages));
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setAttendees([]);
+        setLoadError(reason instanceof Error ? reason.message : "Could not load the attendee list.");
+      })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [event?.id, page, reloadCount]);
+  useEffect(() => {
+    setIssued([]);
+    namesRef.current = new Map();
+    setPage(1);
+    setAttendees([]);
+    setPagination({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+    setIssueError("");
+    setLoading(true);
+    setLoadError("");
+  }, [eventId]);
+
   if (!event) return <NotFoundPage />;
-  const people = getGuests(event.id).filter((guest) => guest.status === "Approved" && guest.attending).flatMap((guest) => [guest.name, ...guest.additionalGuests].map((name) => ({ guest, name })));
-  return <div className="page-stack"><PageTitle eyebrow={event.title.toUpperCase()} title="Guest tickets" description="Every approved guest gets their own pass to your celebration." action={<span className="tickets-total">{people.length} TICKETS</span>} />{people.length ? <div className="ticket-grid">{people.map(({ guest, name }) => <TicketCard key={`${guest.id}-${name}`} event={event} guest={guest} attendeeName={name} />)}</div> : <EmptyState icon={<Ticket size={22} />} title="Tickets will appear here." text="Approve an attending RSVP to create individual guest tickets." action={<Link className="button button-dark" to={`/dashboard/events/${event.id}/guests`}>Review RSVPs <ArrowRight size={15} /></Link>} />}</div>;
+
+  const nameOf = (attendee: ApiAttendee) => `${attendee.firstName} ${attendee.lastName}`.trim();
+  const registrationLabel = (status: ApiAttendee["registrationStatus"]) => status === "APPROVED" ? "Approved"
+    : status === "PENDING" ? "Pending"
+    : status === "DECLINED" || status === "REJECTED" ? "Rejected"
+    : status === "CANCELLED" ? "Cancelled"
+    : "Not required";
+
+  const copyToken = (token: string, name: string) => {
+    if (!navigator.clipboard) {
+      notify(`Copy this code for ${name}: ${token}`);
+      return;
+    }
+    void navigator.clipboard.writeText(token).then(
+      () => notify(`Code for ${name} copied.`),
+      () => notify(`Could not copy automatically. Code for ${name}: ${token}`, "error"),
+    );
+  };
+
+  const handleIssue = async () => {
+    if (issuing) return;
+    setIssuing(true);
+    setIssueError("");
+    try {
+      const result = await issueTickets(event.id);
+      if (result.tickets.length) {
+        setIssued((current) => [...current, ...result.tickets.map((ticket) => ({
+          name: namesRef.current.get(ticket.attendeeId) ?? "Guest",
+          token: ticket.qrToken,
+        }))]);
+      }
+      setReloadCount((current) => current + 1);
+      notify(result.issuedCount
+        ? `${result.issuedCount} ticket${result.issuedCount === 1 ? "" : "s"} issued. Copy the new codes now.`
+        : "No new tickets needed. Every eligible guest already has one.");
+    } catch (reason) {
+      setIssueError(reason instanceof Error ? reason.message : "Tickets could not be issued. Try again.");
+    } finally {
+      setIssuing(false);
+    }
+  };
+
+  return <div className="page-stack">
+    <PageTitle eyebrow={event.title.toUpperCase()} title="Guest tickets" description="Live ticket and check-in status for everyone on the guest list. New QR codes are only shown once, at the moment they are issued." action={<button className="button button-dark" onClick={() => void handleIssue()} disabled={issuing || loading}>{issuing ? <LoaderCircle className="spin" size={15} /> : <Ticket size={15} />} {issuing ? "Issuing…" : "Issue missing tickets"}</button>} />
+    {issueError && <p className="inline-error" role="alert">{issueError}</p>}
+    {issued.length > 0 && <section className="panel issued-token-panel" aria-label="Newly issued ticket codes">
+      <div className="panel-heading"><div><span className="panel-kicker">NEWLY ISSUED — COPY NOW</span><h2>{issued.length} new ticket code{issued.length === 1 ? "" : "s"}</h2></div><ShieldCheck size={17} /></div>
+      <p className="muted-copy">Gather does not store QR codes, so these can only be shown now. Copy each code and send it to the guest, or reprint it before you leave this page.</p>
+      <div className="issued-token-list">
+        {issued.map((item, index) => <div className="issued-token" key={`${item.name}-${index}`}>
+          <span className="guest-avatar">{item.name.split(" ").map((part) => part[0]).join("")}</span>
+          <span className="issued-token-copy"><b>{item.name}</b><code>{item.token}</code></span>
+          <button className="button button-outline button-sm" onClick={() => copyToken(item.token, item.name)}>Copy</button>
+        </div>)}
+      </div>
+    </section>}
+    <section className="panel guest-list-panel" aria-label="Attendee ticket status">
+      {loading ? <div className="empty-state"><LoaderCircle className="spin" size={22} /><h3>Loading attendees</h3><p>Fetching live ticket and check-in status.</p></div>
+        : loadError ? <EmptyState icon={<XCircle size={22} />} title="Attendees couldn't load." text={loadError} action={<button className="button button-outline" onClick={() => setReloadCount((current) => current + 1)}>Try again</button>} />
+        : attendees.length ? <>
+          <div className="table-scroll"><table className="guest-table">
+            <thead><tr><th>ATTENDEE</th><th>TYPE</th><th>REGISTRATION</th><th>TICKET</th><th>CHECK-IN</th></tr></thead>
+            <tbody>{attendees.map((attendee) => {
+              const name = nameOf(attendee);
+              return <tr key={attendee.id}>
+                <td><span className="guest-name-cell"><span className="guest-avatar">{name.split(" ").map((part) => part[0]).join("")}</span><span><b>{name}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span></span></td>
+                <td>{attendee.attendeeType === "PRIMARY" ? "Primary" : "Additional"}</td>
+                <td><StatusBadge status={registrationLabel(attendee.registrationStatus)} /></td>
+                <td><StatusBadge status={attendee.hasTicket ? "Issued" : "Not issued"} /></td>
+                <td>{attendee.checkedIn
+                  ? <span className="checkin-cell"><Check size={14} />{attendee.checkedInAt ? formatDate(attendee.checkedInAt, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }, event.timezone) : "Checked in"}</span>
+                  : <span className="muted-copy">Not checked in</span>}</td>
+              </tr>;
+            })}</tbody>
+          </table></div>
+          {pagination.totalPages > 1 && <div className="guest-pagination">
+            <button className="button button-outline button-sm" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={pagination.page <= 1}><ChevronLeft size={15} /> Previous</button>
+            <span>Page {pagination.page} of {pagination.totalPages} · {pagination.total} attendees</span>
+            <button className="button button-outline button-sm" onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))} disabled={pagination.page >= pagination.totalPages}>Next <ChevronRight size={15} /></button>
+          </div>}
+        </> : <EmptyState icon={<Ticket size={22} />} title="No attendees yet." text="Attendees appear here once guests RSVP and are approved." action={<Link className="button button-dark" to={`/dashboard/events/${event.id}/guests`}>Review RSVPs <ArrowRight size={15} /></Link>} />}
+    </section>
+    <p className="ticket-security-note"><ShieldCheck size={14} /> Tickets are validated at the door by scanning the guest's QR code. Gather does not store existing QR codes, so only newly issued codes can be displayed.</p>
+  </div>;
 }
 
-function TicketCard({ event, guest, attendeeName }: { event: EventRecord; guest: GuestRecord; attendeeName: string }) {
-  const token = ticketToken(guest, attendeeName);
-  const checked = guest.checkedIn.includes(attendeeName);
-  return <article className="ticket-card"><div className="ticket-card-top"><span className="ticket-brand"><span className="brand-symbol"><img src="/gather-mark.png" alt="" /></span><span>gather<span className="brand-period">.</span></span></span><StatusBadge status={checked ? "Checked in" : "Valid"} /></div><div className="ticket-event-title"><span className="panel-kicker">YOU'RE INVITED TO</span><h2>{event.title}</h2><p>Celebrating {event.graduateName}</p></div><div className="ticket-body"><div><span className="ticket-label">ATTENDEE</span><b className="ticket-attendee">{attendeeName}</b><span className="ticket-label">DATE & TIME</span><b>{formatDate(event.startAt, { day: "numeric", month: "long", year: "numeric" }, event.timezone)}</b><small>{formatTime(event.startAt, event.timezone)}</small><span className="ticket-label">VENUE</span><b>{event.venue}</b><small>{event.address}</small></div><div className={`ticket-qr ${checked ? "ticket-qr-checked" : ""}`} aria-label={`Ticket QR for ${attendeeName}`}><QrVisual value={token} /><small>{checked ? "ALREADY USED" : "NOT VALID AT DOOR"}</small></div></div><div className="ticket-ref"><span>REFERENCE</span><b>{token.slice(-8).toUpperCase()}</b><Link to={`/ticket/${token}`}>Open ticket <ExternalLink size={11} /></Link></div><p className="ticket-security-note"><ShieldCheck size={14} /> Ticket verification must be connected before this pass can be used for entry.</p></article>;
+function TicketCard({ event, attendeeName, token, checked }: { event: EventRecord; attendeeName: string; token: string; checked: boolean }) {
+  return <article className="ticket-card"><div className="ticket-card-top"><span className="ticket-brand"><span className="brand-symbol"><img src="/gather-mark.png" alt="" /></span><span>gather<span className="brand-period">.</span></span></span><StatusBadge status={checked ? "Checked in" : "Valid"} /></div><div className="ticket-event-title"><span className="panel-kicker">YOU'RE INVITED TO</span><h2>{event.title}</h2><p>Celebrating {event.graduateName}</p></div><div className="ticket-body"><div><span className="ticket-label">ATTENDEE</span><b className="ticket-attendee">{attendeeName}</b><span className="ticket-label">DATE & TIME</span><b>{formatDate(event.startAt, { day: "numeric", month: "long", year: "numeric" }, event.timezone)}</b><small>{formatTime(event.startAt, event.timezone)}</small><span className="ticket-label">VENUE</span><b>{event.venue}</b><small>{event.address}</small></div><div className={`ticket-qr ${checked ? "ticket-qr-checked" : ""}`} aria-label={`Ticket QR for ${attendeeName}`}><QrVisual value={token} /><small>{checked ? "ALREADY USED" : "NOT VALID AT DOOR"}</small></div></div><div className="ticket-ref"><span>REFERENCE</span><b>{token.slice(-8).toUpperCase()}</b></div><p className="ticket-security-note"><ShieldCheck size={14} /> Sample ticket only. Live ticket validation is not connected to Gather yet.</p></article>;
 }
 
 function QrVisual({ value }: { value: string }) {
@@ -1172,50 +1414,132 @@ function QrVisual({ value }: { value: string }) {
 
 function PublicTicketPage() {
   const { token = "" } = useParams();
-  const { guests, events } = usePlatform();
-  const matched = guests.flatMap((item) => [item.name, ...item.additionalGuests]
-    .filter((name) => ticketToken(item, name) === token)
-    .map((name) => ({ guest: item, name })))[0];
-  const guest = matched?.guest;
-  const event = events.find((item) => item.id === guest?.eventId);
-  const attendeeName = matched?.name;
-  if (!guest || !event || !attendeeName || guest.status !== "Approved") return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> TICKET NOT FOUND</div><h1>This ticket<br /><em>isn't available.</em></h1><p>Tickets become available after the graduate approves your RSVP. If you think this is a mistake, contact the event host.</p><Link className="button button-dark" to="/">Back to Gather <ArrowRight size={16} /></Link></div></div>;
-  return <div className="public-ticket-page"><Brand /><div className="public-ticket-heading"><span className="eyebrow"><span className="eyebrow-line" /> YOUR INVITATION, IN YOUR POCKET</span><h1>A little pass to<br /><em>something special.</em></h1></div><TicketCard event={event} guest={guest} attendeeName={attendeeName} /><p className="public-ticket-help"><Mail size={15} /> Your group receives their tickets by email after approval.</p><Link to={`/event/${event.slug}`} className="back-link"><ArrowLeft size={15} /> Back to the invitation</Link></div>;
+  const { getDemoTicket, authenticated } = usePlatform();
+  const demo = authenticated ? null : getDemoTicket(token);
+  if (authenticated || !demo) {
+    return <div className="simple-error"><Brand /><div className="error-card"><span className="error-ornament">✳</span><div className="eyebrow"><span className="eyebrow-line" /> TICKET NOT AVAILABLE</div><h1>This ticket<br /><em>isn't available.</em></h1><p>{authenticated
+      ? "Live ticket validation is not connected yet. Ask your host for your ticket code; they can check you in at the door."
+      : "This prototype can only display sample tickets. Live ticket validation is not connected to the Gather service yet."}</p><Link className="button button-dark" to="/">Back to Gather <ArrowRight size={16} /></Link></div></div>;
+  }
+  return <div className="public-ticket-page"><Brand /><div className="public-ticket-heading"><span className="eyebrow"><span className="eyebrow-line" /> YOUR INVITATION, IN YOUR POCKET</span><h1>A little pass to<br /><em>something special.</em></h1></div><TicketCard event={demo.event} attendeeName={demo.attendeeName} token={token} checked={demo.checked} /><p className="public-ticket-help"><Mail size={15} /> Your group receives their tickets by email after approval.</p><Link to={`/event/${demo.event.slug}`} className="back-link"><ArrowLeft size={15} /> Back to the invitation</Link></div>;
 }
 
 function CheckInPage() {
   const { eventId = "" } = useParams();
-  const { getEvent, getGuests, checkIn, notify } = usePlatform();
+  const { getEvent, loadAttendees, checkInByTicket, notify } = usePlatform();
   const event = getEvent(eventId);
   const [query, setQuery] = useState("");
   const [scanValue, setScanValue] = useState("");
-  const [scanResult, setScanResult] = useState<{ guest: GuestRecord; name: string; state: "success" | "duplicate" | "invalid" } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [scanResult, setScanResult] = useState<{ state: "success" | "duplicate" | "invalid" | "error"; title: string; detail: string } | null>(null);
+  const eventIdRef = useRef(eventId);
+  const inFlightRef = useRef<string | null>(null);
+  const [attendees, setAttendees] = useState<ApiAttendee[]>([]);
+  const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [reloadCount, setReloadCount] = useState(0);
+
+  useEffect(() => {
+    if (!event) return;
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    void loadAttendees(event.id, page, 20)
+      .then((result) => {
+        if (!active) return;
+        setAttendees(result.attendees);
+        setPagination(result.pagination);
+        if (page > result.pagination.totalPages) setPage(Math.max(1, result.pagination.totalPages));
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setAttendees([]);
+        setLoadError(reason instanceof Error ? reason.message : "Could not load attendees.");
+      })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [event?.id, page, reloadCount]);
+  useEffect(() => {
+    eventIdRef.current = eventId;
+    inFlightRef.current = null;
+    setScanResult(null);
+    setScanValue("");
+    setQuery("");
+    setAttendees([]);
+    setPagination({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+    setPage(1);
+    setChecking(false);
+    setLoading(true);
+    setLoadError("");
+  }, [eventId]);
+
   if (!event) return <NotFoundPage />;
-  const guests = getGuests(event.id);
-  const attendees = guests.filter((guest) => guest.status === "Approved" && guest.attending).flatMap((guest) => [guest.name, ...guest.additionalGuests].map((name) => ({ guest, name })));
-  const checkedCount = attendees.filter(({ guest, name }) => guest.checkedIn.includes(name)).length;
-  const progress = attendees.length ? Math.round(checkedCount / attendees.length * 100) : 0;
-  const results = attendees.filter(({ guest, name }) => `${name} ${guest.name} ${guest.email} ${guest.phone} ${ticketToken(guest, name)}`.toLowerCase().includes(query.toLowerCase()));
-  const handleScan = (value: string) => {
-    setScanValue(value);
-    const found = attendees.find(({ guest, name }) => ticketToken(guest, name) === value.trim());
-    if (!found) { setScanResult({ guest: { id: "", eventId: event.id, name: "Unknown guest", email: "", phone: "", relationship: "", attending: true, additionalGuests: [], status: "Declined", submittedAt: "", checkedIn: [] }, name: "", state: "invalid" }); return; }
-    if (found.guest.checkedIn.includes(found.name)) { setScanResult({ ...found, state: "duplicate" }); return; }
-    const success = checkIn(found.guest.id, found.name);
-    setScanResult({ ...found, state: success ? "success" : "duplicate" });
-    if (success) notify(`${found.name} is checked in.`);
+
+  const nameOf = (attendee: ApiAttendee) => `${attendee.firstName} ${attendee.lastName}`.trim();
+  const eligible = attendees.filter((attendee) => attendee.attendanceIntent === "ATTENDING" && attendee.registrationStatus === "APPROVED");
+  const checkedCount = eligible.filter((attendee) => attendee.checkedIn).length;
+  const progress = eligible.length ? Math.round(checkedCount / eligible.length * 100) : 0;
+  const results = attendees.filter((attendee) => `${nameOf(attendee)} ${attendee.attendeeType}`.toLowerCase().includes(query.trim().toLowerCase()));
+
+  const handleScan = async (value: string) => {
+    const token = value.trim();
+    setScanValue(token);
+    if (!token) {
+      setScanResult({ state: "invalid", title: "No ticket code", detail: "Scan or paste a ticket code first." });
+      return;
+    }
+    if (inFlightRef.current !== null) return;
+    const targetEventId = event.id;
+    inFlightRef.current = targetEventId;
+    setChecking(true);
+    setScanResult(null);
+    try {
+      const result = await checkInByTicket(targetEventId, token);
+      if (eventIdRef.current !== targetEventId) return;
+      const name = `${result.attendee.firstName} ${result.attendee.lastName}`.trim();
+      setScanResult({ state: "success", title: "You're all set!", detail: `${name} · checked in at ${formatTime(result.checkedInAt, event.timezone)}` });
+      notify(`${name} is checked in.`);
+      setReloadCount((current) => current + 1);
+    } catch (reason) {
+      if (eventIdRef.current !== targetEventId) return;
+      const status = reason instanceof ApiError ? reason.status : 0;
+      if (status === 404) {
+        setScanResult({ state: "invalid", title: "Ticket not recognised", detail: "That code does not match a ticket for this event. Check the code and try again." });
+      } else if (status === 409) {
+        setScanResult({ state: "duplicate", title: "Already checked in or not eligible", detail: reason instanceof Error ? reason.message : "This ticket has already been used or is not eligible for entry." });
+      } else {
+        setScanResult({ state: "error", title: "Could not check in", detail: reason instanceof Error ? reason.message : "Something went wrong. Try again." });
+      }
+    } finally {
+      if (inFlightRef.current === targetEventId) inFlightRef.current = null;
+      if (eventIdRef.current === targetEventId) setChecking(false);
+    }
   };
-  const manualCheckIn = (guest: GuestRecord, name: string) => {
-    if (guest.checkedIn.includes(name)) { setScanResult({ guest, name, state: "duplicate" }); return; }
-    if (!window.confirm(`Check in ${name}?`)) return;
-    checkIn(guest.id, name);
-    setScanResult({ guest, name, state: "success" });
-    notify(`${name} is checked in.`);
-  };
-  return <div className="page-stack checkin-page"><PageTitle eyebrow="THE DAY IS HERE" title="Welcome them in." description={`Check in guests for ${event.title}.`} action={<span className="checkin-live"><i /> EVENT DAY MODE</span>} />
-    <div className="checkin-stats"><div><span className="checkin-stat-icon"><Users size={17} /></span><span><b>{attendees.length}</b><small>Approved attendees</small></span></div><div><span className="checkin-stat-icon checked-stat"><Check size={17} /></span><span><b>{checkedCount}</b><small>Welcomed in</small></span></div><div className="checkin-progress-stat"><span><b>{progress}%</b><small>Check-in complete</small></span><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div></div>
-    <div className="checkin-layout"><section className="scanner-panel panel"><div className="scanner-panel-title"><span className="scanner-title-icon"><QrCode size={19} /></span><span><b>Scan a guest's ticket</b><small>Point the camera at their QR code</small></span></div><Suspense fallback={<div className="scanner-viewport"><LoaderCircle className="spin" size={22} /></div>}><Scanner onScan={handleScan} /></Suspense><div className="scanner-divider"><span />OR ENTER TICKET CODE<span /></div><div className="scanner-input-row"><div className="search-field"><QrCode size={16} /><input value={scanValue} onChange={(e) => setScanValue(e.target.value)} placeholder="Paste ticket code…" onKeyDown={(e) => e.key === "Enter" && handleScan(scanValue)} /></div><button className="button button-dark" onClick={() => handleScan(scanValue)}>Check ticket <ArrowRight size={15} /></button></div>{scanResult && <div className={`scan-result scan-${scanResult.state}`}><span className="scan-result-icon">{scanResult.state === "success" ? <Check size={20} /> : scanResult.state === "duplicate" ? <CheckCircle2 size={20} /> : <XCircle size={20} />}</span><span><b>{scanResult.state === "success" ? "You're all set!" : scanResult.state === "duplicate" ? "Already checked in" : "Ticket not recognised"}</b><small>{scanResult.state === "success" ? `${scanResult.name} · Welcome to ${event.title}` : scanResult.state === "duplicate" ? `${scanResult.name} has already been checked in.` : "Try another code or look up your guest manually."}</small></span><button className="icon-button" onClick={() => setScanResult(null)} aria-label="Dismiss scan result"><X size={16} /></button></div>}</section>
-      <section className="panel manual-lookup-panel"><div className="panel-heading"><div><span className="panel-kicker">CAMERA NOT COOPERATING?</span><h2>Find them by name.</h2></div><Search size={17} /></div><div className="search-field manual-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Name, phone, email or ticket code…" /></div><div className="manual-results">{results.slice(0, 8).map(({ guest, name }) => { const checked = guest.checkedIn.includes(name); return <div className="manual-result" key={`${guest.id}-${name}`}><span className="guest-avatar">{name.split(" ").map((p) => p[0]).join("")}</span><span><b>{name}</b><small>{guest.name === name ? "Primary guest" : `With ${guest.name}`}</small></span>{checked ? <StatusBadge status="Checked in" /> : <button className="mini-action approve-action" onClick={() => manualCheckIn(guest, name)} aria-label={`Check in ${name}`}><Check size={15} /></button>}</div>; })}{!results.length && <span className="manual-empty">No approved guests found. Try another search.</span>}</div><Link className="subtle-link checkin-view-guests" to={`/dashboard/events/${event.id}/guests`}>View guest list <ArrowRight size={14} /></Link></section></div>
+
+  return <div className="page-stack checkin-page">
+    <PageTitle eyebrow="THE DAY IS HERE" title="Welcome them in." description={`Check in guests for ${event.title} by scanning the QR code on their ticket.`} action={<span className="checkin-live"><i /> EVENT DAY MODE</span>} />
+    <div className="checkin-stats"><div><span className="checkin-stat-icon"><Users size={17} /></span><span><b>{pagination.total}</b><small>Total attendees</small></span></div><div><span className="checkin-stat-icon checked-stat"><Check size={17} /></span><span><b>{checkedCount}</b><small>Checked in on this page</small></span></div><div className="checkin-progress-stat"><span><b>{progress}%</b><small>Page check-in complete</small></span><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div></div>
+    <div className="checkin-layout"><section className="scanner-panel panel"><div className="scanner-panel-title"><span className="scanner-title-icon"><QrCode size={19} /></span><span><b>Scan a guest's ticket</b><small>Point the camera at their QR code</small></span></div><Suspense fallback={<div className="scanner-viewport"><LoaderCircle className="spin" size={22} /></div>}><Scanner onScan={handleScan} /></Suspense><div className="scanner-divider"><span />OR ENTER TICKET CODE<span /></div><div className="scanner-input-row"><div className="search-field"><QrCode size={16} /><input value={scanValue} onChange={(e) => setScanValue(e.target.value)} placeholder="Paste ticket code…" disabled={checking} onKeyDown={(e) => e.key === "Enter" && void handleScan(scanValue)} /></div><button className="button button-dark" onClick={() => void handleScan(scanValue)} disabled={checking}>{checking ? <LoaderCircle className="spin" size={15} /> : <ArrowRight size={15} />} {checking ? "Checking…" : "Check ticket"}</button></div>{scanResult && <div className={`scan-result scan-${scanResult.state}`} role="status"><span className="scan-result-icon">{scanResult.state === "success" ? <Check size={20} /> : scanResult.state === "duplicate" ? <CheckCircle2 size={20} /> : <XCircle size={20} />}</span><span><b>{scanResult.title}</b><small>{scanResult.detail}</small></span><button className="icon-button" onClick={() => setScanResult(null)} aria-label="Dismiss scan result"><X size={16} /></button></div>}</section>
+      <section className="panel manual-lookup-panel"><div className="panel-heading"><div><span className="panel-kicker">CAMERA NOT COOPERATING?</span><h2>Look up a guest.</h2></div><Search size={17} /></div><div className="search-field manual-search"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search name or attendee type…" /></div><div className="manual-results">{loading ? <span className="manual-empty">Loading attendees…</span>
+        : loadError ? <span className="manual-empty">{loadError}</span>
+        : results.slice(0, 8).map((attendee) => {
+          const name = nameOf(attendee);
+          return <div className="manual-result" key={attendee.id}>
+            <span className="guest-avatar">{name.split(" ").map((part) => part[0]).join("")}</span>
+            <span><b>{name}</b><small>{attendee.attendeeType === "PRIMARY" ? "Primary guest" : "Additional guest"}</small></span>
+            {attendee.checkedIn ? <StatusBadge status="Checked in" /> : <span className="muted-copy">Not checked in</span>}
+          </div>;
+        })}
+        {!loading && !loadError && !results.length && <span className="manual-empty">No attendees match that search.</span>}</div>
+        {pagination.totalPages > 1 && <div className="guest-pagination">
+          <button className="button button-outline button-sm" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={pagination.page <= 1}><ChevronLeft size={15} /> Previous</button>
+          <span>Page {pagination.page} of {pagination.totalPages}</span>
+          <button className="button button-outline button-sm" onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))} disabled={pagination.page >= pagination.totalPages}>Next <ChevronRight size={15} /></button>
+        </div>}
+        <p className="ticket-security-note"><ShieldCheck size={14} /> Check-in is confirmed by the guest's QR code only; name lookup is read-only.</p>
+        <Link className="subtle-link checkin-view-guests" to={`/dashboard/events/${event.id}/guests`}>View guest list <ArrowRight size={14} /></Link></section></div>
   </div>;
 }
 
