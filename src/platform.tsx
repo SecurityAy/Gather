@@ -170,6 +170,7 @@ function normalizeGalleryImages(event: EventRecord & { galleryPublic?: boolean; 
     }
   }
   const { galleryPublic: _legacyGalleryPublic, ...normalized } = event;
+  void _legacyGalleryPublic;
   return { ...normalized, galleryImages };
 }
 
