@@ -282,6 +282,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       credentials: "include",
       cache: init.cache ?? "no-store",
     });
+    // If the backend's device columns are not migrated yet, a valid x-device-id can
+    // make public endpoints fail. Retry once without it so the invitation still loads.
+    if (response.status >= 500 && path.startsWith("/api/events/public/")) {
+      const retryHeaders = new Headers(headers);
+      retryHeaders.delete("x-device-id");
+      response = await fetch(`${apiBaseUrl}${path}`, {
+        ...init,
+        headers: retryHeaders,
+        credentials: "include",
+        cache: init.cache ?? "no-store",
+      });
+    }
   } catch {
     throw new ApiError("Could not reach Gather. Check the API connection and try again.", 0);
   }
