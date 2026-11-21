@@ -484,6 +484,16 @@ export const api = {
       `/api/events/${encodeURIComponent(eventId)}/tickets/issue`,
       { method: "POST", body: JSON.stringify({}) },
     ),
+  reissueAttendeeTicket: (eventId: string, attendeeId: string) =>
+    request<{ attendeeId: string; ticketId: string; qrToken: string }>(
+      `/api/events/${encodeURIComponent(eventId)}/attendees/${encodeURIComponent(attendeeId)}/tickets/reissue`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  revokeAttendeeTicket: (eventId: string, attendeeId: string) =>
+    request<{ attendeeId: string; ticketId: string; ticketStatus: string }>(
+      `/api/events/${encodeURIComponent(eventId)}/attendees/${encodeURIComponent(attendeeId)}/tickets/revoke`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
   listEventAttendees: (eventId: string, page = 1, pageSize = 50) =>
     request<ApiAttendeeListResponse>(
       `/api/events/${encodeURIComponent(eventId)}/attendees?page=${page}&pageSize=${pageSize}`,

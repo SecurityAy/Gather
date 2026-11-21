@@ -7,6 +7,7 @@ import {
   attendeesResponse,
   createFetchMock,
   eventsResponse,
+  jsonResponse,
   makeAttendee,
   makeEvent,
   NavButton,
@@ -141,6 +142,37 @@ describe("TicketManagementPage", () => {
 
     expect(await screen.findByText("Grace Hopper")).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("TOKEN-EV1")).toBeNull());
+  });
+
+  it("reissues and revokes an attendee ticket", async () => {
+    let hasTicket = true;
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.pathname === "/api/events/ev1/attendees") {
+        return jsonResponse(200, attendeesResponse([
+          makeAttendee({ id: "a1", firstName: "Ada", lastName: "Lovelace", hasTicket }),
+        ]));
+      }
+      if (method === "POST" && url.pathname === "/api/events/ev1/attendees/a1/tickets/reissue") {
+        return jsonResponse(200, { attendeeId: "a1", ticketId: "t1", qrToken: "NEW-TOKEN" });
+      }
+      if (method === "POST" && url.pathname === "/api/events/ev1/attendees/a1/tickets/revoke") {
+        hasTicket = false;
+        return jsonResponse(200, { attendeeId: "a1", ticketId: "t1", ticketStatus: "VOID" });
+      }
+      return createFetchMock(baseRoutes())(input, init);
+    });
+    vi.stubGlobal("fetch", mock);
+
+    renderApp("/dashboard/events/ev1/tickets");
+    await screen.findByText("Ada Lovelace");
+
+    fireEvent.click(screen.getByRole("button", { name: /reissue/i }));
+    expect(await screen.findByText("NEW-TOKEN")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /revoke/i }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: /reissue/i })).toBeNull());
   });
 
   it("does not overwrite a newly selected event with a stale attendee response", async () => {

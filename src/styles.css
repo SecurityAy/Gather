@@ -363,6 +363,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .issued-token-copy code { font-size: 10px; color: #77796e; word-break: break-all; }
 .detail-issued-tickets { margin-top: 14px; }
 .checkin-cell { display: inline-flex; align-items: center; gap: 5px; color: #5e6d52; }
+.ticket-row-actions { display: inline-flex; gap: 6px; }
 
 /* Dashboard home */
 .welcome-strip { min-height: 130px; display: flex; align-items: center; justify-content: space-between; gap: 22px; padding: 25px 28px; border: 1px solid #eae9e1; background: #fffefa; }

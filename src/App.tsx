@@ -1267,7 +1267,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function TicketManagementPage() {
   const { eventId = "" } = useParams();
-  const { getEvent, loadAttendees, issueTickets, notify } = usePlatform();
+  const { getEvent, loadAttendees, issueTickets, reissueAttendeeTicket, revokeAttendeeTicket, notify } = usePlatform();
   const event = getEvent(eventId);
   const [page, setPage] = useState(1);
   const [attendees, setAttendees] = useState<ApiAttendee[]>([]);
@@ -1278,6 +1278,7 @@ function TicketManagementPage() {
   const [issuing, setIssuing] = useState(false);
   const [issueError, setIssueError] = useState("");
   const [issued, setIssued] = useState<Array<{ name: string; token: string }>>([]);
+  const [ticketAction, setTicketAction] = useState<{ attendeeId: string; kind: "reissue" | "revoke" } | null>(null);
   const namesRef = useRef<Map<string, string>>(new Map());
   const pageSize = 20;
 
@@ -1358,6 +1359,38 @@ function TicketManagementPage() {
     }
   };
 
+  const handleReissue = async (attendee: ApiAttendee) => {
+    if (ticketAction) return;
+    setTicketAction({ attendeeId: attendee.id, kind: "reissue" });
+    setIssueError("");
+    try {
+      const result = await reissueAttendeeTicket(event.id, attendee.id);
+      const name = nameOf(attendee);
+      setIssued((current) => [...current, { name, token: result.qrToken }]);
+      setReloadCount((current) => current + 1);
+      notify(`New QR code issued for ${name}. Copy it now.`);
+    } catch (reason) {
+      setIssueError(reason instanceof Error ? reason.message : "Ticket could not be reissued. Try again.");
+    } finally {
+      setTicketAction(null);
+    }
+  };
+
+  const handleRevoke = async (attendee: ApiAttendee) => {
+    if (ticketAction) return;
+    setTicketAction({ attendeeId: attendee.id, kind: "revoke" });
+    setIssueError("");
+    try {
+      await revokeAttendeeTicket(event.id, attendee.id);
+      setReloadCount((current) => current + 1);
+      notify(`Ticket revoked for ${nameOf(attendee)}.`);
+    } catch (reason) {
+      setIssueError(reason instanceof Error ? reason.message : "Ticket could not be revoked. Try again.");
+    } finally {
+      setTicketAction(null);
+    }
+  };
+
   return <div className="page-stack">
     <PageTitle eyebrow={event.title.toUpperCase()} title="Guest tickets" description="Live ticket and check-in status for everyone on the guest list. New QR codes are only shown once, at the moment they are issued." action={<button className="button button-dark" onClick={() => void handleIssue()} disabled={issuing || loading}>{issuing ? <LoaderCircle className="spin" size={15} /> : <Ticket size={15} />} {issuing ? "Issuing…" : "Issue missing tickets"}</button>} />
     {issueError && <p className="inline-error" role="alert">{issueError}</p>}
@@ -1377,7 +1410,7 @@ function TicketManagementPage() {
         : loadError ? <EmptyState icon={<XCircle size={22} />} title="Attendees couldn't load." text={loadError} action={<button className="button button-outline" onClick={() => setReloadCount((current) => current + 1)}>Try again</button>} />
         : attendees.length ? <>
           <div className="table-scroll"><table className="guest-table">
-            <thead><tr><th>ATTENDEE</th><th>TYPE</th><th>REGISTRATION</th><th>TICKET</th><th>CHECK-IN</th></tr></thead>
+            <thead><tr><th>ATTENDEE</th><th>TYPE</th><th>REGISTRATION</th><th>TICKET</th><th>CHECK-IN</th><th>ACTIONS</th></tr></thead>
             <tbody>{attendees.map((attendee) => {
               const name = nameOf(attendee);
               return <tr key={attendee.id}>
@@ -1388,6 +1421,16 @@ function TicketManagementPage() {
                 <td>{attendee.checkedIn
                   ? <span className="checkin-cell"><Check size={14} />{attendee.checkedInAt ? formatDate(attendee.checkedInAt, { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }, event.timezone) : "Checked in"}</span>
                   : <span className="muted-copy">Not checked in</span>}</td>
+                <td><span className="ticket-row-actions">
+                  {attendee.hasTicket && !attendee.checkedIn && <>
+                    <button className="button button-outline button-sm" onClick={() => void handleRevoke(attendee)} disabled={ticketAction !== null}>
+                      {ticketAction?.attendeeId === attendee.id && ticketAction.kind === "revoke" ? "Revoking…" : "Revoke"}
+                    </button>
+                    <button className="button button-outline button-sm" onClick={() => void handleReissue(attendee)} disabled={ticketAction !== null}>
+                      {ticketAction?.attendeeId === attendee.id && ticketAction.kind === "reissue" ? <><LoaderCircle className="spin" size={13} /> Reissuing…</> : "Reissue"}
+                    </button>
+                  </>}
+                </span></td>
               </tr>;
             })}</tbody>
           </table></div>

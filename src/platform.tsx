@@ -434,6 +434,8 @@ interface PlatformContextValue {
   checkInByTicket: (eventId: string, qrToken: string) => Promise<ApiCheckInResult>;
   loadAttendees: (eventId: string, page?: number, pageSize?: number) => Promise<ApiAttendeeListResponse>;
   issueTickets: (eventId: string) => Promise<{ tickets: Array<{ attendeeId: string; ticketId: string; qrToken: string }>; issuedCount: number }>;
+  reissueAttendeeTicket: (eventId: string, attendeeId: string) => Promise<{ attendeeId: string; ticketId: string; qrToken: string }>;
+  revokeAttendeeTicket: (eventId: string, attendeeId: string) => Promise<{ attendeeId: string; ticketId: string; ticketStatus: string }>;
   getEvent: (idOrSlug: string) => EventRecord | undefined;
   getPublishedGallery: (eventId: string) => GalleryImage[];
   getGuests: (eventId: string) => GuestRecord[];
@@ -651,6 +653,12 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
     },
     issueTickets: async (eventId) => {
       return await api.issueEventTickets(eventId);
+    },
+    reissueAttendeeTicket: async (eventId, attendeeId) => {
+      return await api.reissueAttendeeTicket(eventId, attendeeId);
+    },
+    revokeAttendeeTicket: async (eventId, attendeeId) => {
+      return await api.revokeAttendeeTicket(eventId, attendeeId);
     },
     getEvent: (idOrSlug) => events.find((event) => event.id === idOrSlug || event.slug === idOrSlug),
     getPublishedGallery: (eventId) => {
