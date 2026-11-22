@@ -186,3 +186,81 @@ describe("RsvpPage", () => {
     expect(await screen.findByText(/rsvp window closed/i)).toBeTruthy();
   });
 });
+
+describe("RsvpConfirmation cancellation", () => {
+  const token = "confirmation-token-1";
+
+  beforeEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+    localStorage.setItem(`gather.rsvp.${slug}`, JSON.stringify({
+      token,
+      submittedAt: "2026-11-21T00:00:00.000Z",
+      attendanceIntent: "ATTENDING",
+    }));
+  });
+
+  it("cancels the RSVP after confirmation and clears the stored token", async () => {
+    const mock = createFetchMock([
+      { method: "POST", path: `/api/events/public/${slug}/rsvp/confirmation`, body: { confirmation } },
+      { method: "GET", path: `/api/events/public/${slug}`, body: { event: makePublicEvent() } },
+      {
+        method: "POST",
+        path: `/api/events/public/${slug}/rsvp/cancel`,
+        body: { registration: { id: "reg1", status: "CANCELLED", cancelledAt: "2026-11-21T01:00:00.000Z" }, voidedTickets: 0 },
+      },
+    ]);
+    vi.stubGlobal("fetch", mock);
+
+    renderApp(`/event/${slug}/confirmation`);
+    expect(await screen.findByText(/almost yours/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel my rsvp/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, cancel my rsvp/i }));
+
+    expect(await screen.findByText(/your rsvp has been cancelled/i)).toBeTruthy();
+    const cancelCall = mock.mock.calls.find((call) => {
+      const init = (call[1] ?? {}) as RequestInit;
+      const url = new URL(String(call[0]));
+      return (init.method ?? "GET").toUpperCase() === "POST" && url.pathname.endsWith("/rsvp/cancel");
+    });
+    const cancelBody = JSON.parse(String((cancelCall?.[1] as RequestInit).body));
+    expect(cancelBody).toEqual({ token });
+    expect(localStorage.getItem(`gather.rsvp.${slug}`)).toBeNull();
+  });
+
+  it("keeps the RSVP when the guest chooses not to cancel", async () => {
+    const mock = createFetchMock([
+      { method: "POST", path: `/api/events/public/${slug}/rsvp/confirmation`, body: { confirmation } },
+      { method: "GET", path: `/api/events/public/${slug}`, body: { event: makePublicEvent() } },
+    ]);
+    vi.stubGlobal("fetch", mock);
+
+    renderApp(`/event/${slug}/confirmation`);
+    expect(await screen.findByText(/almost yours/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel my rsvp/i }));
+    fireEvent.click(screen.getByRole("button", { name: /keep my rsvp/i }));
+
+    expect(screen.getByRole("button", { name: /cancel my rsvp/i })).toBeTruthy();
+    expect(screen.queryByText(/your rsvp has been cancelled/i)).toBeNull();
+  });
+
+  it("shows an error when cancellation fails", async () => {
+    const mock = createFetchMock([
+      { method: "POST", path: `/api/events/public/${slug}/rsvp/confirmation`, body: { confirmation } },
+      { method: "GET", path: `/api/events/public/${slug}`, body: { event: makePublicEvent() } },
+      { method: "POST", path: `/api/events/public/${slug}/rsvp/cancel`, status: 500, body: { message: "Could not cancel" } },
+    ]);
+    vi.stubGlobal("fetch", mock);
+
+    renderApp(`/event/${slug}/confirmation`);
+    expect(await screen.findByText(/almost yours/i)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /cancel my rsvp/i }));
+    fireEvent.click(screen.getByRole("button", { name: /yes, cancel my rsvp/i }));
+
+    expect(await screen.findByText("Could not cancel")).toBeTruthy();
+    expect(localStorage.getItem(`gather.rsvp.${slug}`)).not.toBeNull();
+  });
+});

@@ -908,6 +908,9 @@ function RsvpConfirmation() {
   const [graduateName, setGraduateName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState("");
 
   useEffect(() => {
     if (!token) {
@@ -973,6 +976,27 @@ function RsvpConfirmation() {
   }
 
   const isAttending = confirmation.attendanceIntent === "ATTENDING";
+  const isFinalStatus = confirmation.status === "APPROVED" || confirmation.status === "DECLINED" || confirmation.status === "REJECTED" || confirmation.status === "CANCELLED";
+  const handleCancelRsvp = async () => {
+    if (cancelling) return;
+    setCancelling(true);
+    setCancelError("");
+    try {
+      await api.cancelRsvp(slug, token);
+      try {
+        localStorage.removeItem(`gather.rsvp.${slug}`);
+        sessionStorage.removeItem(`gather.rsvp.${slug}.token`);
+      } catch {
+        // ignore storage cleanup failures
+      }
+      setConfirmation((current) => (current ? { ...current, status: "CANCELLED" } : current));
+      setConfirmingCancel(false);
+    } catch (reason) {
+      setCancelError(reason instanceof Error ? reason.message : "Your RSVP could not be cancelled. Please try again.");
+    } finally {
+      setCancelling(false);
+    }
+  };
   const primaryAttendee = confirmation.attendees.find((a) => a.attendeeType === "PRIMARY") || confirmation.attendees[0];
   const guestName = primaryAttendee ? `${primaryAttendee.firstName} ${primaryAttendee.lastName}`.trim() : "Your seat";
   const eventTitle = confirmation.event?.title || "the celebration";
@@ -991,7 +1015,7 @@ function RsvpConfirmation() {
             ? `${guestName}, your RSVP for ${eventTitle} is with ${displayGraduate} for approval.`
             : `${displayGraduate} will be sorry to miss you at ${eventTitle}.`}
         </p>
-        {isAttending && (
+        {isAttending && !isFinalStatus && (
           <div className="confirmation-next">
             <span className="step-icon"><Clock3 size={18} /></span>
             <span>
@@ -999,6 +1023,30 @@ function RsvpConfirmation() {
               <small>We'll send your individual ticket by email once you're approved.</small>
             </span>
             <StatusBadge status={badgeStatus} />
+          </div>
+        )}
+        {confirmation.status === "CANCELLED" && (
+          <div className="confirmation-cancelled" role="status">
+            <span className="step-icon"><XCircle size={18} /></span>
+            <span>
+              <b>Your RSVP has been cancelled.</b>
+              <small>{isAttending ? "Any tickets that were issued for this RSVP have been voided." : "You're all set — no further action is needed."}</small>
+            </span>
+          </div>
+        )}
+        {cancelError && <p className="inline-error" role="alert">{cancelError}</p>}
+        {!isFinalStatus && confirmation.status !== "CANCELLED" && !confirmingCancel && (
+          <button type="button" className="confirmation-cancel-link" onClick={() => setConfirmingCancel(true)}>Cancel my RSVP</button>
+        )}
+        {confirmingCancel && confirmation.status !== "CANCELLED" && (
+          <div className="confirmation-cancel-confirm" role="group" aria-label="Confirm RSVP cancellation">
+            <p>Are you sure you want to cancel your RSVP{confirmation.attendees.length > 1 ? ` for ${confirmation.attendees.length} guests` : ""}? {isAttending && "Any issued tickets will be voided."} This can't be undone.</p>
+            <div className="confirmation-cancel-actions">
+              <button type="button" className="button button-outline button-sm" onClick={() => setConfirmingCancel(false)} disabled={cancelling}>Keep my RSVP</button>
+              <button type="button" className="button button-dark button-sm" onClick={() => void handleCancelRsvp()} disabled={cancelling}>
+                {cancelling ? <><LoaderCircle className="spin" size={14} /> Cancelling…</> : "Yes, cancel my RSVP"}
+              </button>
+            </div>
           </div>
         )}
         <Link className="button button-dark" to={`/event/${slug}`}>Back to the invitation <ArrowRight size={16} /></Link>

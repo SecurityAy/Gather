@@ -145,7 +145,7 @@ export interface ApiRsvpSubmissionResponse {
 export interface ApiRsvpConfirmationResponse {
   confirmation: {
     attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
-    status: "PENDING" | "APPROVED" | "NOT_REQUIRED";
+    status: "PENDING" | "APPROVED" | "NOT_REQUIRED" | "CANCELLED" | "DECLINED" | "REJECTED";
     relationshipToGraduate: string | null;
     createdAt: string;
     event: {
@@ -456,6 +456,17 @@ export const api = {
   getRsvpConfirmation: (slug: string, token: string) =>
     request<ApiRsvpConfirmationResponse>(
       `/api/events/public/${encodeURIComponent(slug)}/rsvp/confirmation`,
+      {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      },
+    ),
+  cancelRsvp: (slug: string, token: string) =>
+    request<{
+      registration: { id: string; status: string; cancelledAt: string };
+      voidedTickets: number;
+    }>(
+      `/api/events/public/${encodeURIComponent(slug)}/rsvp/cancel`,
       {
         method: "POST",
         body: JSON.stringify({ token }),

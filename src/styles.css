@@ -664,6 +664,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .confirmation-next b { font-size: 9px; }
 .confirmation-next small { color: #8b8e84; font-size: 8px; line-height: 1.5; }
 .confirmation-signoff { margin-top: 20px; color: #999a91; font-family: var(--serif); font-size: 11px; font-style: italic; }
+.confirmation-cancel-link { margin-top: 16px; padding: 0; border: 0; background: none; color: #9d7580; font-size: 10px; text-decoration: underline; cursor: pointer; }
+.confirmation-cancel-link:hover { color: #7d5560; }
+.confirmation-cancel-confirm { width: 100%; margin: 16px 0; padding: 14px; border: 1px solid var(--danger-border, #e8c9c9); border-radius: var(--r-lg); background: var(--danger-soft, #fdf1f0); }
+.confirmation-cancel-confirm p { margin: 0 0 12px; color: #7a4a4a; font-size: 10px; line-height: 1.6; }
+.confirmation-cancel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.confirmation-cancelled { width: 100%; display: flex; align-items: center; gap: 10px; margin: 21px 0; padding: 12px; border: 1px solid #e7e9e0; background: #f8f9f5; }
+.confirmation-cancelled > span:nth-child(2) { display: grid; flex: 1; gap: 4px; }
+.confirmation-cancelled b { font-size: 9px; }
+.confirmation-cancelled small { color: #8b8e84; font-size: 8px; line-height: 1.5; }
 .rsvp-closed-page { min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 30px; }
 .rsvp-closed-page > .brand { align-self: flex-start; }
 
