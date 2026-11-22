@@ -1,4 +1,4 @@
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { clearAccessToken, setAccessToken } from "../api/client";
 import { createFetchMock, eventsResponse, makeEvent, renderApp, testUser } from "./test-utils";
@@ -42,13 +42,18 @@ describe("ThemeProvider", () => {
 });
 
 describe("SettingsPage", () => {
-  it("disables controls that the API does not support", async () => {
-    vi.stubGlobal("fetch", createFetchMock(dashboardRoutes()));
+  it("loads and saves the email notification preference", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      ...dashboardRoutes(),
+      { method: "GET", path: "/api/me/preferences", body: { preferences: { emailNotifications: true } } },
+      { method: "PUT", path: "/api/me/preferences", body: { preferences: { emailNotifications: false } } },
+    ]));
     renderApp("/dashboard/settings");
 
-    expect((await screen.findByRole("button", { name: /change password/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: /^manage$/i }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("checkbox", { name: /email notifications unavailable/i }) as HTMLInputElement).disabled).toBe(true);
+    const toggle = await screen.findByRole("checkbox", { name: /email notifications/i });
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect((screen.getByRole("checkbox", { name: /email notifications/i }) as HTMLInputElement).checked).toBe(false));
   });
 
   it("switches theme from the appearance options", async () => {
@@ -60,14 +65,102 @@ describe("SettingsPage", () => {
 
     expect(document.documentElement.dataset.theme).toBe("dark");
   });
+
+  it("exports the account data as a JSON download", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      ...dashboardRoutes(),
+      { method: "GET", path: "/api/me/preferences", body: { preferences: { emailNotifications: true } } },
+      {
+        method: "GET",
+        path: "/api/me/data-export",
+        body: {
+          exportedAt: "2026-11-21T00:00:00.000Z",
+          user: testUser,
+          events: [],
+          registrations: [],
+        },
+      },
+    ]));
+    renderApp("/dashboard/settings");
+    await screen.findByRole("checkbox", { name: /email notifications/i });
+
+    let downloadName = "";
+    const anchorClickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, "click")
+      .mockImplementation(function (this: HTMLAnchorElement) {
+        downloadName = this.download;
+      });
+    // jsdom does not implement these two URL helpers.
+    const objectUrls: string[] = [];
+    const revokedUrls: string[] = [];
+    (URL as unknown as { createObjectURL: (blob: Blob) => string }).createObjectURL = () => {
+      const url = `blob:gather-${objectUrls.length}`;
+      objectUrls.push(url);
+      return url;
+    };
+    (URL as unknown as { revokeObjectURL: (url: string) => void }).revokeObjectURL = (url: string) => {
+      revokedUrls.push(url);
+    };
+
+    fireEvent.click(screen.getByRole("button", { name: /^manage$/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /export my data/i }));
+
+    await waitFor(() => expect(downloadName).toMatch(/^gather-data-export-.*\.json$/));
+    expect(objectUrls.length).toBeGreaterThan(0);
+    expect(revokedUrls).toContain(objectUrls[0]);
+
+    anchorClickSpy.mockRestore();
+    delete (URL as unknown as { createObjectURL?: unknown }).createObjectURL;
+    delete (URL as unknown as { revokeObjectURL?: unknown }).revokeObjectURL;
+  });
+
+  it("changes the password through the API", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      ...dashboardRoutes(),
+      { method: "GET", path: "/api/me/preferences", body: { preferences: { emailNotifications: true } } },
+      { method: "POST", path: "/api/auth/change-password", body: { message: "Your password has been updated." } },
+    ]));
+    renderApp("/dashboard/settings");
+    await screen.findByRole("checkbox", { name: /email notifications/i });
+
+    fireEvent.click(screen.getByRole("button", { name: /change password/i }));
+    fireEvent.change(screen.getByLabelText(/current password/i), { target: { value: "oldpassword" } });
+    fireEvent.change(screen.getByLabelText(/^new password/i), { target: { value: "newpassword" } });
+    fireEvent.change(screen.getByLabelText(/confirm new password/i), { target: { value: "newpassword" } });
+    fireEvent.click(screen.getByRole("button", { name: /save password/i }));
+
+    expect(await screen.findByText(/your password was updated/i)).toBeTruthy();
+  });
 });
 
 describe("ProfilePage", () => {
-  it("disables profile editing until the API supports it", async () => {
-    vi.stubGlobal("fetch", createFetchMock(dashboardRoutes()));
+  it("saves updated profile details through the API", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      ...dashboardRoutes(),
+      { method: "PATCH", path: "/api/auth/me", body: { user: { ...testUser, firstName: "Grace", lastName: "Hopper" } } },
+    ]));
     renderApp("/dashboard/profile");
+    await screen.findByLabelText(/first name/i);
 
-    expect((await screen.findByRole("button", { name: /save changes/i }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText(/first name/i), { target: { value: "Grace" } });
+    fireEvent.change(screen.getByLabelText(/last name/i), { target: { value: "Hopper" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(await screen.findByText(/your profile has been updated/i)).toBeTruthy();
+  });
+
+  it("shows the API error when the email is already taken", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      ...dashboardRoutes(),
+      { method: "PATCH", path: "/api/auth/me", status: 409, body: { message: "That email is already in use." } },
+    ]));
+    renderApp("/dashboard/profile");
+    await screen.findByLabelText(/first name/i);
+
+    fireEvent.change(screen.getByLabelText(/first name/i), { target: { value: "Grace" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+
+    expect(await screen.findByText("That email is already in use.")).toBeTruthy();
   });
 });
 

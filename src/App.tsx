@@ -8,7 +8,7 @@ import {
   MapPin, Menu, MoreHorizontal, Plus, Search, Settings, Share2, ShieldCheck,
   Sparkles, Sun, Moon, Ticket, Trash2, Upload, UserRound, Users, X, XCircle, QrCode,
 } from "lucide-react";
-import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, Outlet, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { QRCodeSVG } from "qrcode.react";
 import JSZip from "jszip";
 import { formatDate, formatTime, localDateTime, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
@@ -308,11 +308,82 @@ function readImagePreview(file: File, onProgress: (progress: number) => void = (
 }
 
 function ForgotPasswordPage() {
-  return <div className="simple-auth"><Brand /><div className="simple-auth-card"><div className="auth-icon"><Mail size={21} /></div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT RECOVERY</div><h1>Forgot your password?</h1><p>Password reset emails aren't available in this version yet. Please try again once email delivery is connected.</p><div className="demo-auth-note"><ShieldCheck size={15} /> Email delivery requires a connected email service.</div><Link className="back-link" to="/login"><ArrowLeft size={15} /> Back to sign in</Link></div></div>;
+  const [sent, setSent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    const data = new FormData(event.currentTarget);
+    const email = String(data.get("email") ?? "").trim();
+    if (!email) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.forgotPassword(email);
+      setSent(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not send the reset link. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <div className="simple-auth"><Brand /><div className="simple-auth-card"><div className="auth-icon"><Mail size={21} /></div><div className="eyebrow"><span className="eyebrow-line" /> ACCOUNT RECOVERY</div>{sent ? <>
+    <h1>Check your inbox.</h1>
+    <p>If an account exists for that email, we've sent a link to reset your password. The link expires in one hour.</p>
+    <div className="demo-auth-note"><ShieldCheck size={15} /> Didn't get it? Check your spam folder or try again.</div>
+  </> : <>
+    <h1>Forgot your password?</h1>
+    <p>It happens. Share your email and we'll send you a link to reset it.</p>
+    {error && <p className="inline-error" role="alert">{error}</p>}
+    <form className="form-stack" onSubmit={(event) => void submit(event)}>
+      <Field label="Email address" name="email" type="email" placeholder="you@example.com" required />
+      <button className="button button-dark button-full" type="submit" disabled={busy}>{busy ? <><LoaderCircle className="spin" size={15} /> Sending…</> : <>Send reset link <ArrowRight size={16} /></>}</button>
+    </form>
+  </>}<Link className="back-link" to="/login"><ArrowLeft size={15} /> Back to sign in</Link></div></div>;
 }
 
 function ResetPasswordPage() {
-  return <div className="simple-auth"><Brand /><div className="simple-auth-card"><div className="auth-icon"><LockKeyhole size={21} /></div><div className="eyebrow"><span className="eyebrow-line" /> NEW PASSWORD</div><h1>Choose a new password.</h1><p>Password updates require a connected account service and aren't available in this version yet.</p><div className="demo-auth-note"><ShieldCheck size={15} /> Password changes require a connected account service.</div><Link className="back-link" to="/login"><ArrowLeft size={15} /> Back to sign in</Link></div></div>;
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const token = searchParams.get("token") || "";
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy) return;
+    if (!token) {
+      setError("This reset link is missing its token. Please request a new one.");
+      return;
+    }
+    const data = new FormData(event.currentTarget);
+    const password = String(data.get("password") ?? "");
+    const confirm = String(data.get("confirm") ?? "");
+    if (password !== confirm) {
+      setError("Those passwords don't match yet.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await api.resetPassword(token, password);
+      setDone(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update your password. Please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (done) {
+    return <div className="simple-auth"><Brand /><div className="simple-auth-card"><div className="auth-icon"><CheckCircle2 size={21} /></div><div className="eyebrow"><span className="eyebrow-line" /> PASSWORD UPDATED</div><h1>You're all set.</h1><p>Your password has been updated. You can sign in with your new password now.</p><Link className="button button-dark button-full" to="/login">Back to sign in <ArrowRight size={16} /></Link></div></div>;
+  }
+
+  return <div className="simple-auth"><Brand /><div className="simple-auth-card"><div className="auth-icon"><LockKeyhole size={21} /></div><div className="eyebrow"><span className="eyebrow-line" /> NEW PASSWORD</div><h1>Choose a new password.</h1>{!token && <p className="inline-error" role="alert">This reset link is missing its token. Please request a new one.</p>}{error && <p className="inline-error" role="alert">{error}</p>}<form className="form-stack" onSubmit={(event) => void submit(event)}><Field label="New password" name="password" type="password" required minLength={8} /><Field label="Confirm password" name="confirm" type="password" required minLength={8} /><button className="button button-dark button-full" type="submit" disabled={busy || !token}>{busy ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <>Save new password <ArrowRight size={16} /></>}</button></form><Link className="back-link" to="/login" onClick={() => navigate("/login")}><ArrowLeft size={15} /> Back to sign in</Link></div></div>;
 }
 
 function DashboardLayout() {
@@ -382,7 +453,9 @@ function DashboardPage() {
   const totalRSVP = events.reduce((sum, event) => sum + (event.registrationCount ?? 0), 0);
   const pending = events.reduce((sum, event) => sum + (event.pendingRegistrationCount ?? 0), 0);
   const approved = events.reduce((sum, event) => sum + (event.approvedAttendeeCount ?? 0), 0);
-  const stats = [{ label: "Your events", value: String(events.length).padStart(2, "0"), change: "All in one place", icon: CalendarDays, tone: "sand" }, { label: "RSVPs received", value: String(totalRSVP).padStart(2, "0"), change: `${pending} waiting for you`, icon: Users, tone: "lilac" }, { label: "Guests approved", value: String(approved).padStart(2, "0"), change: "Across all your events", icon: CheckCircle2, tone: "mint" }, { label: "Checked in", value: "—", change: "Open an event's check-in page", icon: QrCode, tone: "rose" }];
+  const hasCheckedInData = events.some((event) => event.checkedInCount !== undefined);
+  const checkedIn = events.reduce((sum, event) => sum + (event.checkedInCount ?? 0), 0);
+  const stats = [{ label: "Your events", value: String(events.length).padStart(2, "0"), change: "All in one place", icon: CalendarDays, tone: "sand" }, { label: "RSVPs received", value: String(totalRSVP).padStart(2, "0"), change: `${pending} waiting for you`, icon: Users, tone: "lilac" }, { label: "Guests approved", value: String(approved).padStart(2, "0"), change: "Across all your events", icon: CheckCircle2, tone: "mint" }, { label: "Checked in", value: hasCheckedInData ? String(checkedIn).padStart(2, "0") : "—", change: hasCheckedInData ? "Across all your events" : "Open an event's check-in page", icon: QrCode, tone: "rose" }];
   const latest = [...events].sort((a, b) => b.startAt.localeCompare(a.startAt)).slice(0, 3);
   const upcoming = events[0];
   const daysUntilEvent = upcoming ? Math.max(0, Math.ceil((new Date(upcoming.startAt).getTime() - Date.now()) / 86_400_000)) : 0;
@@ -1109,7 +1182,7 @@ function EventOverviewPage() {
   return <div className="page-stack">
     {justPublished && <div className="confetti-burst" aria-hidden="true">{Array.from({ length: 28 }, (_, index) => <span key={index} style={{ left: `${(index * 47 + 7) % 100}%`, animationDelay: `${index % 6 * 70}ms`, backgroundColor: `hsl(${(index * 43) % 360} 55% 65%)` }} />)}</div>}
     <section className={`event-overview-hero${event.coverImage ? " has-cover" : ""}`} aria-label="Event overview"><div className={`event-overview-photo${event.coverImage ? " has-cover" : ""}`}>{event.coverImage ? <img className="event-overview-cover" src={event.coverImage} alt="" aria-hidden="true" /> : <><div className="event-overview-pattern">✳</div><div className="event-hero-monogram">{event.graduateName.charAt(0)}</div></>}</div><div className="event-overview-hero-copy"><div className="event-overview-top"><span className="panel-kicker">YOUR CELEBRATION</span><StatusBadge status={event.status} /></div><h1>{event.title}</h1><p>{event.description || "All the details for your special day."}</p><div className="event-hero-meta"><span><CalendarDays size={15} />{formatDate(event.startAt)}</span><span><MapPin size={15} />{event.venue}</span></div><div className="event-overview-actions"><Link to={`/event/${event.slug}`} target="_blank" rel="noopener noreferrer" className="button button-outline button-sm">Preview invitation <ExternalLink size={14} /></Link><button className="button button-dark button-sm" onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/event/${event.slug}`).then(() => notify("Invitation link copied."), () => notify("Couldn't copy the link. You can share the invitation directly.", "error")); }}><Copy size={14} /> Copy invitation link</button><button className="button button-outline button-sm" onClick={shareInvitation}><Share2 size={16} /> Share</button></div></div></section>
-    <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: "—", label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
+    <div className="event-mini-stats">{[{ value: String(event.registrationCount ?? 0).padStart(2, "0"), label: "RSVP submissions", icon: Users }, { value: String(pending).padStart(2, "0"), label: "Pending your review", icon: Clock3 }, { value: String(approvedPeople).padStart(2, "0"), label: "Expected guests", icon: CheckCircle2 }, { value: event.checkedInCount !== undefined ? String(event.checkedInCount).padStart(2, "0") : "—", label: "Checked in", icon: QrCode }].map(({ value, label, icon: Icon }) => <div className="mini-stat" key={label}><Icon size={17} /><span><b>{value}</b><small>{label}</small></span></div>)}</div>
     <section className="capacity-summary" aria-label="Guest capacity summary"><div className="capacity-summary-heading"><span className="panel-kicker">GUEST CAPACITY</span><strong>{capacityLimit === null ? "Unlimited capacity" : `Maximum capacity: ${capacityLimit}`}</strong></div>{capacityLimit === null ? <p>There is no event-wide limit on attending guests.</p> : <><div className="capacity-progress" role="progressbar" aria-label="Reserved guest capacity" aria-valuemin={0} aria-valuemax={capacityLimit} aria-valuenow={Math.min(reservedSpaces, capacityLimit)}><span style={{ width: `${capacityPercent}%` }} /></div><div className="capacity-summary-metrics"><span>Reserved spaces <b>{reservedSpaces}</b></span><span>Available spaces <b>{availableSpaces ?? 0}</b></span></div></>}</section>
     <div className="dashboard-columns"><section className="panel"><div className="panel-heading"><div><span className="panel-kicker">A LITTLE TO DO</span><h2>Guest RSVPs</h2></div><button className="subtle-link" onClick={() => navigate(`/dashboard/events/${event.id}/guests`)}>View all <ArrowRight size={14} /></button></div><EmptyState icon={<CheckCircle2 size={22} />} title={pending ? `${pending} registration${pending === 1 ? "" : "s"} pending.` : "Your RSVP details are ready to view."} text="You can review submitted RSVPs and approve or decline guests from their details page." /></section><section className="panel event-quick-panel"><div className="panel-heading"><div><span className="panel-kicker">QUICK LINKS</span><h2>On the day</h2></div></div><Link to={`/dashboard/events/${event.id}/check-in`} className="quick-action"><span className="quick-action-icon peach"><QrCode size={18} /></span><span><b>Open check-in</b><small>Scan a guest ticket</small></span><ArrowRight size={15} /></Link><Link to={`/dashboard/events/${event.id}/tickets`} className="quick-action"><span className="quick-action-icon lavender"><Ticket size={18} /></span><span><b>Manage tickets</b><small>View guest passes</small></span><ArrowRight size={15} /></Link><button className="quick-action" onClick={() => navigate(`/dashboard/events/${event.id}/edit`)}><span className="quick-action-icon sage"><Settings size={18} /></span><span><b>Edit event details</b><small>Make a change</small></span><ArrowRight size={15} /></button></section></div>
   </div>;
@@ -1326,7 +1399,7 @@ function TicketManagementPage() {
   const [issuing, setIssuing] = useState(false);
   const [issueError, setIssueError] = useState("");
   const [issued, setIssued] = useState<Array<{ name: string; token: string }>>([]);
-  const [ticketAction, setTicketAction] = useState<{ attendeeId: string; kind: "reissue" | "revoke" } | null>(null);
+  const [ticketAction, setTicketAction] = useState<{ attendeeId: string; kind: "reissue" | "revoke" | "resend" } | null>(null);
   const namesRef = useRef<Map<string, string>>(new Map());
   const pageSize = 20;
 
@@ -1439,6 +1512,28 @@ function TicketManagementPage() {
     }
   };
 
+  const handleResendEmail = async (attendee: ApiAttendee) => {
+    if (ticketAction) return;
+    const ticketId = attendee.ticketId;
+    if (!ticketId) {
+      setIssueError("This attendee has no ticket to resend.");
+      return;
+    }
+    setTicketAction({ attendeeId: attendee.id, kind: "resend" });
+    setIssueError("");
+    try {
+      const result = await api.resendTicketEmail(event.id, ticketId);
+      setReloadCount((current) => current + 1);
+      notify(result.deliveryStatus === "SENT"
+        ? `Ticket email sent to ${nameOf(attendee)}.`
+        : `Ticket email queued for ${nameOf(attendee)}.`);
+    } catch (reason) {
+      setIssueError(reason instanceof Error ? reason.message : "Ticket email could not be sent. Try again.");
+    } finally {
+      setTicketAction(null);
+    }
+  };
+
   return <div className="page-stack">
     <PageTitle eyebrow={event.title.toUpperCase()} title="Guest tickets" description="Live ticket and check-in status for everyone on the guest list. New QR codes are only shown once, at the moment they are issued." action={<button className="button button-dark" onClick={() => void handleIssue()} disabled={issuing || loading}>{issuing ? <LoaderCircle className="spin" size={15} /> : <Ticket size={15} />} {issuing ? "Issuing…" : "Issue missing tickets"}</button>} />
     {issueError && <p className="inline-error" role="alert">{issueError}</p>}
@@ -1471,6 +1566,10 @@ function TicketManagementPage() {
                   : <span className="muted-copy">Not checked in</span>}</td>
                 <td><span className="ticket-row-actions">
                   {attendee.hasTicket && !attendee.checkedIn && <>
+                    {attendee.deliveryStatus === "FAILED" && <span className="delivery-failed" title={attendee.deliveryError ?? undefined}>Email failed</span>}
+                    <button className="button button-outline button-sm" onClick={() => void handleResendEmail(attendee)} disabled={ticketAction !== null}>
+                      {ticketAction?.attendeeId === attendee.id && ticketAction.kind === "resend" ? <><LoaderCircle className="spin" size={13} /> Sending…</> : "Resend email"}
+                    </button>
                     <button className="button button-outline button-sm" onClick={() => void handleRevoke(attendee)} disabled={ticketAction !== null}>
                       {ticketAction?.attendeeId === attendee.id && ticketAction.kind === "revoke" ? "Revoking…" : "Revoke"}
                     </button>
@@ -1724,15 +1823,143 @@ function GalleryPage() {
 }
 
 function ProfilePage() {
-  const { user } = usePlatform();
+  const { user, updateProfile } = usePlatform();
   const initials = user ? `${user.firstName[0] ?? ""}${user.lastName[0] ?? ""}`.toUpperCase() : "G";
-  return <div className="page-stack"><PageTitle eyebrow="THE PERSON BEHIND THE PARTY" title="Your profile" description="A few details about you and your account." /><div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR DETAILS</span><h2>Profile information</h2></div></div><div className="profile-edit-avatar"><span className="profile-avatar profile-avatar-xl">{initials}</span></div><div className="form-grid"><Field label="Full name" name="profile-name" defaultValue={`${user?.firstName ?? ""} ${user?.lastName ?? ""}`.trim()} /><Field label="Email address" name="profile-email" defaultValue={user?.email ?? ""} type="email" /><div className="field field-span"><label htmlFor="profile-bio">A little about you</label><textarea id="profile-bio" rows={3} placeholder="Tell us something about yourself…" /></div></div><div className="settings-footer"><button className="button button-dark" disabled title="Profile editing is not available in the current API.">Save changes <Check size={15} /></button></div></section><aside className="panel profile-help"><span className="auth-icon"><UserRound size={19} /></span><h3>Your profile, your story.</h3><p>Your Gather account details are loaded securely from your profile.</p><div className="demo-auth-note"><ShieldCheck size={15} /><span>Profile updates are not available in the current API.</span></div></aside></div></div>;
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving || !user) return;
+    const data = new FormData(event.currentTarget);
+    const firstName = String(data.get("profile-first") ?? "").trim();
+    const lastName = String(data.get("profile-last") ?? "").trim();
+    const email = String(data.get("profile-email") ?? "").trim();
+    if (!firstName || !lastName) {
+      setError("Please add your first and last name.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setSaved(false);
+    try {
+      await updateProfile({ firstName, lastName, email });
+      setSaved(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save your profile. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <div className="page-stack"><PageTitle eyebrow="THE PERSON BEHIND THE PARTY" title="Your profile" description="A few details about you and your account." /><div className="settings-layout"><section className="panel settings-panel"><div className="panel-heading"><div><span className="panel-kicker">YOUR DETAILS</span><h2>Profile information</h2></div></div><div className="profile-edit-avatar"><span className="profile-avatar profile-avatar-xl">{initials}</span></div><form className="form-stack" onSubmit={(event) => void submit(event)}><div className="form-grid"><Field label="First name" name="profile-first" defaultValue={user?.firstName ?? ""} /><Field label="Last name" name="profile-last" defaultValue={user?.lastName ?? ""} /><div className="field field-span"><Field label="Email address" name="profile-email" defaultValue={user?.email ?? ""} type="email" /></div></div>{error && <p className="inline-error" role="alert">{error}</p>}{saved && <p className="inline-success" role="status">Your profile has been updated.</p>}<div className="settings-footer"><button className="button button-dark" type="submit" disabled={saving}>{saving ? <><LoaderCircle className="spin" size={15} /> Saving…</> : <>Save changes <Check size={15} /></>}</button></div></form></section><aside className="panel profile-help"><span className="auth-icon"><UserRound size={19} /></span><h3>Your profile, your story.</h3><p>Your Gather account details are loaded securely from your profile.</p><div className="demo-auth-note"><ShieldCheck size={15} /><span>Your name and email are used on tickets and RSVP emails.</span></div></aside></div></div>;
 }
 
 function SettingsPage() {
-  const { signOut } = usePlatform();
+  const { signOut, user, getPreferences, updatePreferences, deleteAccount } = usePlatform();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
+  const [emailNotifications, setEmailNotifications] = useState(true);
+  const [preferencesLoading, setPreferencesLoading] = useState(true);
+  const [preferencesError, setPreferencesError] = useState("");
+  const [savingPreferences, setSavingPreferences] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordDone, setPasswordDone] = useState(false);
+  const [showDataPanel, setShowDataPanel] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setPreferencesLoading(true);
+    void getPreferences()
+      .then((preferences) => { if (active) setEmailNotifications(preferences.emailNotifications); })
+      .catch((reason: unknown) => { if (active) setPreferencesError(reason instanceof Error ? reason.message : "Could not load your preferences."); })
+      .finally(() => { if (active) setPreferencesLoading(false); });
+    return () => { active = false; };
+  }, [getPreferences]);
+
+  const toggleNotifications = async (next: boolean) => {
+    if (savingPreferences) return;
+    const previous = emailNotifications;
+    setEmailNotifications(next);
+    setSavingPreferences(true);
+    setPreferencesError("");
+    try {
+      await updatePreferences({ emailNotifications: next });
+    } catch (reason) {
+      setEmailNotifications(previous);
+      setPreferencesError(reason instanceof Error ? reason.message : "Could not save your preference.");
+    } finally {
+      setSavingPreferences(false);
+    }
+  };
+
+  const exportData = async () => {
+    if (exporting) return;
+    setExporting(true);
+    setExportError("");
+    try {
+      const data = await api.getDataExport();
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `gather-data-export-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (reason) {
+      setExportError(reason instanceof Error ? reason.message : "Could not export your data.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const changePassword = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (passwordBusy) return;
+    const data = new FormData(event.currentTarget);
+    const currentPassword = String(data.get("current-password") ?? "");
+    const newPassword = String(data.get("new-password") ?? "");
+    const confirm = String(data.get("confirm-password") ?? "");
+    if (newPassword !== confirm) {
+      setPasswordError("Those new passwords don't match yet.");
+      return;
+    }
+    setPasswordBusy(true);
+    setPasswordError("");
+    try {
+      await api.changePassword(currentPassword, newPassword);
+      setPasswordDone(true);
+      setShowPasswordForm(false);
+    } catch (reason) {
+      setPasswordError(reason instanceof Error ? reason.message : "Could not change your password.");
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
+
+  const removeAccount = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteAccount();
+      navigate("/", { replace: true });
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : "Could not delete your account.");
+      setDeleting(false);
+    }
+  };
+
   return <div className="page-stack">
     <PageTitle eyebrow="MAKE YOURSELF AT HOME" title="Settings" description="A few preferences for your Gather workspace." />
     <div className="settings-layout">
@@ -1746,9 +1973,30 @@ function SettingsPage() {
             <button type="button" className={`theme-option ${theme === "dark" ? "selected" : ""}`} aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}><Moon size={14} /> Dark</button>
           </div>
         </div>
-        <div className="setting-row"><span className="setting-icon"><Mail size={17} /></span><span><b>Email notifications</b><small>Email delivery requires a connected email service.</small></span><input type="checkbox" disabled aria-label="Email notifications unavailable" title="Connect an email service to enable email notifications" /></div>
-        <div className="setting-row"><span className="setting-icon"><LockKeyhole size={17} /></span><span><b>Password & security</b><small>Password changes aren't available until an account service is connected.</small></span><button className="button button-outline button-sm" disabled title="Password changes require a connected API.">Change password</button></div>
-        <div className="setting-row"><span className="setting-icon"><ShieldCheck size={17} /></span><span><b>Your data</b><small>Export and removal aren't available until an account service is connected.</small></span><button className="button button-outline button-sm" disabled title="Data controls will be available with the connected API.">Manage</button></div>
+        <div className="setting-row"><span className="setting-icon"><Mail size={17} /></span><span><b>Email notifications</b><small>{preferencesLoading ? "Loading your preference…" : preferencesError ? preferencesError : "Get an email when a guest RSVPs to your event."}</small></span><input type="checkbox" checked={emailNotifications} disabled={preferencesLoading || savingPreferences} aria-label="Email notifications" onChange={(e) => void toggleNotifications(e.target.checked)} /></div>
+        <div className="setting-row"><span className="setting-icon"><LockKeyhole size={17} /></span><span><b>Password & security</b><small>{passwordDone ? "Your password was updated." : "Keep your account safe and up to date."}</small></span><button className="button button-outline button-sm" onClick={() => { setShowPasswordForm((current) => !current); setPasswordDone(false); setPasswordError(""); }}>Change password</button></div>
+        {showPasswordForm && <form className="form-stack settings-inline-form" onSubmit={(event) => void changePassword(event)}>
+          <Field label="Current password" name="current-password" type="password" required />
+          <Field label="New password" name="new-password" type="password" required minLength={8} />
+          <Field label="Confirm new password" name="confirm-password" type="password" required minLength={8} />
+          {passwordError && <p className="inline-error" role="alert">{passwordError}</p>}
+          <div className="settings-inline-actions"><button className="button button-outline button-sm" type="button" onClick={() => setShowPasswordForm(false)} disabled={passwordBusy}>Cancel</button><button className="button button-dark button-sm" type="submit" disabled={passwordBusy}>{passwordBusy ? <><LoaderCircle className="spin" size={14} /> Saving…</> : "Save password"}</button></div>
+        </form>}
+        <div className="setting-row"><span className="setting-icon"><ShieldCheck size={17} /></span><span><b>Your data</b><small>{exportError ? exportError : "Download a copy of your data, or delete your account."}</small></span><button className="button button-outline button-sm" onClick={() => setShowDataPanel((current) => !current)}>{showDataPanel ? "Close" : "Manage"}</button></div>
+        {showDataPanel && <div className="settings-data-panel">
+          <div className="settings-data-actions">
+            <button className="button button-outline button-sm" onClick={() => void exportData()} disabled={exporting}>{exporting ? <><LoaderCircle className="spin" size={14} /> Preparing…</> : <>Export my data <Download size={14} /></>}</button>
+          </div>
+          <p className="field-foot">Your export includes your profile, the events you own, and RSVPs made with {user?.email ?? "your email"}.</p>
+          {!confirmDelete ? <button className="button button-outline button-sm danger-outline" onClick={() => setConfirmDelete(true)}>Delete my account</button> : <div className="settings-delete-confirm">
+            <p>This permanently removes your account and soft-deletes your events. This can't be undone.</p>
+            {deleteError && <p className="inline-error" role="alert">{deleteError}</p>}
+            <div className="settings-inline-actions">
+              <button className="button button-outline button-sm" onClick={() => setConfirmDelete(false)} disabled={deleting}>Keep my account</button>
+              <button className="button button-dark button-sm" onClick={() => void removeAccount()} disabled={deleting}>{deleting ? <><LoaderCircle className="spin" size={14} /> Deleting…</> : "Yes, delete my account"}</button>
+            </div>
+          </div>}
+        </div>}
         <div className="settings-footer"><button className="button button-outline danger-outline" onClick={() => { signOut(); navigate("/"); }}>Sign out of Gather <LogOut size={15} /></button></div>
       </section>
       <aside className="panel profile-help"><span className="auth-icon"><CircleHelp size={19} /></span><h3>We're here for you.</h3><p>Have a question about your events or guests? We'd love to help make your day easy.</p><a className="subtle-link" href="mailto:hello@gather.example">Get in touch <ArrowRight size={14} /></a></aside>

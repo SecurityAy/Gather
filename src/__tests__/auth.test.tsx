@@ -108,3 +108,75 @@ describe("AuthPage", () => {
     expect(await screen.findByText(/enter your first and last name/i)).toBeTruthy();
   });
 });
+
+describe("ForgotPasswordPage", () => {
+  it("submits the email and shows the confirmation state", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "POST", path: "/api/auth/forgot-password", body: { message: "If an account exists for that email, a reset link has been sent." } },
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      { method: "GET", path: "/api/events", body: eventsResponse([]) },
+    ]));
+    renderApp("/forgot-password");
+
+    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: "ada@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: /send reset link/i }));
+
+    expect(await screen.findByText(/check your inbox/i)).toBeTruthy();
+  });
+
+  it("shows the API error when the request fails", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "POST", path: "/api/auth/forgot-password", status: 429, body: { message: "Too many requests." } },
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      { method: "GET", path: "/api/events", body: eventsResponse([]) },
+    ]));
+    renderApp("/forgot-password");
+
+    fireEvent.change(screen.getByLabelText(/email address/i), { target: { value: "ada@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: /send reset link/i }));
+
+    expect(await screen.findByText("Too many requests.")).toBeTruthy();
+  });
+});
+
+describe("ResetPasswordPage", () => {
+  it("rejects mismatched passwords before calling the API", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      { method: "GET", path: "/api/events", body: eventsResponse([]) },
+    ]));
+    renderApp("/reset-password?token=reset-token");
+
+    fireEvent.change(screen.getByLabelText(/new password/i), { target: { value: "password123" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "password124" } });
+    fireEvent.click(screen.getByRole("button", { name: /save new password/i }));
+
+    expect(await screen.findByText(/those passwords don't match/i)).toBeTruthy();
+  });
+
+  it("saves a new password and shows the success state", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "POST", path: "/api/auth/reset-password", body: { message: "Your password has been updated." } },
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      { method: "GET", path: "/api/events", body: eventsResponse([]) },
+    ]));
+    renderApp("/reset-password?token=reset-token");
+
+    fireEvent.change(screen.getByLabelText(/new password/i), { target: { value: "password123" } });
+    fireEvent.change(screen.getByLabelText(/confirm password/i), { target: { value: "password123" } });
+    fireEvent.click(screen.getByRole("button", { name: /save new password/i }));
+
+    expect(await screen.findByText(/you're all set/i)).toBeTruthy();
+  });
+
+  it("warns when the reset link has no token", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      { method: "GET", path: "/api/events", body: eventsResponse([]) },
+    ]));
+    renderApp("/reset-password");
+
+    expect(await screen.findByText(/missing its token/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /save new password/i })).toBeTruthy();
+  });
+});

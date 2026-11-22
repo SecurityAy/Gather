@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, clearAccessToken, getAccessToken, setAccessToken } from "./api/client";
-import type { ApiAttendeeListResponse, ApiCheckInResult, ApiEvent, ApiPublicEvent, ApiUser } from "./api/client";
+import type { ApiAttendeeListResponse, ApiCheckInResult, ApiEvent, ApiPreferences, ApiPublicEvent, ApiUser } from "./api/client";
 
 export type EventStatus = "Draft" | "Published" | "Unpublished" | "Cancelled" | "Completed" | "Archived";
 export type GuestStatus = "Pending" | "Approved" | "Declined";
@@ -41,6 +41,7 @@ export interface EventRecord {
   registrationCount?: number;
   pendingRegistrationCount?: number;
   approvedAttendeeCount?: number;
+  checkedInCount?: number;
   hasReserved?: boolean;
 }
 
@@ -294,6 +295,7 @@ export function eventFromApi(event: ApiEvent): EventRecord {
     registrationCount: event.counts?.registrationCount ?? 0,
     pendingRegistrationCount: event.counts?.pendingRegistrationCount ?? 0,
     approvedAttendeeCount: event.counts?.approvedAttendeeCount ?? 0,
+    checkedInCount: event.counts?.checkedInCount,
   };
 }
 
@@ -421,6 +423,10 @@ interface PlatformContextValue {
   eventsError: string;
   login: (email: string, password: string) => Promise<ApiUser>;
   register: (firstName: string, lastName: string, email: string, password: string) => Promise<ApiUser>;
+  updateProfile: (input: { firstName?: string; lastName?: string; email?: string }) => Promise<ApiUser>;
+  deleteAccount: () => Promise<void>;
+  getPreferences: () => Promise<ApiPreferences>;
+  updatePreferences: (preferences: ApiPreferences) => Promise<ApiPreferences>;
   signOut: () => void;
   refreshEvents: () => Promise<void>;
   refreshEvent: (id: string) => Promise<EventRecord>;
@@ -548,6 +554,27 @@ export function PlatformProvider({ children }: { children: React.ReactNode }) {
       setAuthError("");
       await refreshEvents().catch(() => undefined);
       return result.user;
+    },
+    updateProfile: async (input) => {
+      const result = await api.updateProfile(input);
+      setUser(result.user);
+      return result.user;
+    },
+    deleteAccount: async () => {
+      await api.deleteAccount();
+      clearAccessToken();
+      setUser(null);
+      setEvents([]);
+      setEventsError("");
+      setAuthError("");
+    },
+    getPreferences: async () => {
+      const result = await api.getPreferences();
+      return result.preferences;
+    },
+    updatePreferences: async (preferences) => {
+      const result = await api.updatePreferences(preferences);
+      return result.preferences;
     },
     signOut: () => {
       clearAccessToken();

@@ -42,7 +42,7 @@ describe("DashboardPage", () => {
     expect(statCard("Your events")?.querySelector("strong")?.textContent).toBe("01");
   });
 
-  it("shows an honest unavailable state instead of a fabricated check-in count", async () => {
+  it("shows an honest placeholder when the API has no check-in count", async () => {
     vi.stubGlobal("fetch", createFetchMock(dashboardRoutes()));
 
     renderApp("/dashboard");
@@ -50,7 +50,27 @@ describe("DashboardPage", () => {
 
     const checkedCard = statCard("Checked in");
     expect(checkedCard?.querySelector("strong")?.textContent).toBe("—");
-    expect(checkedCard?.textContent).not.toMatch(/\b00\b/);
     expect(checkedCard?.textContent).toMatch(/open an event's check-in page/i);
+  });
+
+  it("sums check-in counts across events when the API provides them", async () => {
+    vi.stubGlobal("fetch", createFetchMock([
+      { method: "GET", path: "/api/auth/me", body: { user: testUser } },
+      {
+        method: "GET",
+        path: "/api/events",
+        body: eventsResponse([
+          makeEvent({ id: "ev1", title: "Graduation 2026", counts: { registrationCount: 12, pendingRegistrationCount: 4, approvedAttendeeCount: 8, checkedInCount: 5 } }),
+          makeEvent({ id: "ev2", title: "Graduation 2027", counts: { registrationCount: 3, pendingRegistrationCount: 0, approvedAttendeeCount: 3, checkedInCount: 1 } }),
+        ]),
+      },
+    ]));
+
+    renderApp("/dashboard");
+    await screen.findAllByText("Graduation 2026");
+
+    const checkedCard = statCard("Checked in");
+    expect(checkedCard?.querySelector("strong")?.textContent).toBe("06");
+    expect(checkedCard?.textContent).toMatch(/across all your events/i);
   });
 });

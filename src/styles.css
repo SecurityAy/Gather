@@ -250,6 +250,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .auth-visual-rule { width: 40px; height: 1px; margin-bottom: 15px; background: #c8b891; }
 .required-star { color: var(--danger); }
 .inline-error { display: flex; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--danger-border); border-radius: 4px; color: var(--danger); background: var(--danger-bg); font-size: 10px; animation: validation-alert var(--motion-base) var(--motion-ease) both; }
+.inline-success { display: flex; align-items: center; gap: 8px; padding: 10px 11px; border: 1px solid var(--success-border, #cfe3d4); border-radius: 4px; color: var(--success, #3f6b47); background: var(--success-bg, #eef6ef); font-size: 10px; }
 .inline-error svg { flex: 0 0 auto; }
 .spin { animation: spin 1s linear infinite; }
 .skeleton { display: block; width: 100%; height: 14px; border-radius: 4px; background: linear-gradient(90deg, var(--beige) 25%, var(--canvas) 37%, var(--beige) 63%); background-size: 400% 100%; animation: skeleton-shimmer 1.4s ease infinite; }
@@ -364,6 +365,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .detail-issued-tickets { margin-top: 14px; }
 .checkin-cell { display: inline-flex; align-items: center; gap: 5px; color: #5e6d52; }
 .ticket-row-actions { display: inline-flex; gap: 6px; }
+.delivery-failed { color: var(--danger); font-size: 9px; font-weight: 600; }
+.settings-inline-form { padding: 14px; border: 1px solid #efeee8; border-radius: var(--r-lg); background: #fbfbf8; }
+.settings-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.settings-data-panel { padding: 14px; border: 1px solid #efeee8; border-radius: var(--r-lg); background: #fbfbf8; }
+.settings-data-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.settings-delete-confirm { margin-top: 10px; padding-top: 10px; border-top: 1px solid #efeee8; }
+.settings-delete-confirm p { margin: 0 0 10px; color: #85877f; font-size: 10px; line-height: 1.6; }
 
 /* Dashboard home */
 .welcome-strip { min-height: 130px; display: flex; align-items: center; justify-content: space-between; gap: 22px; padding: 25px 28px; border: 1px solid #eae9e1; background: #fffefa; }

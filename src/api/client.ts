@@ -15,6 +15,32 @@ export interface ApiUser {
   updatedAt: string;
 }
 
+export interface ApiPreferences {
+  emailNotifications: boolean;
+}
+
+export interface ApiDataExportResponse {
+  exportedAt: string;
+  user: ApiUser;
+  events: Array<{
+    id: string;
+    title: string;
+    slug: string;
+    eventStatus: string;
+    eventDate: string | null;
+    venueName: string | null;
+    registrationCount: number;
+    approvedAttendeeCount: number;
+    createdAt: string;
+  }>;
+  registrations: Array<{
+    eventTitle: string;
+    attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
+    status: string;
+    createdAt: string;
+  }>;
+}
+
 export interface ApiEvent {
   id: string;
   userId: string;
@@ -50,6 +76,7 @@ export interface ApiEvent {
     registrationCount: number;
     pendingRegistrationCount: number;
     approvedAttendeeCount: number;
+    checkedInCount?: number;
   };
 }
 
@@ -211,6 +238,37 @@ export interface ApiOrganiserRsvpDetailResponse {
   tickets?: ApiIssuedTicket[];
 }
 
+export interface ApiBulkRsvpResult {
+  registrationId: string;
+  ok: boolean;
+  status?: string;
+  tickets?: ApiIssuedTicket[];
+  error?: string;
+}
+
+export interface ApiBulkRsvpResponse {
+  results: ApiBulkRsvpResult[];
+}
+
+export interface ApiAuditEntry {
+  id: string;
+  action: string;
+  actorId: string | null;
+  eventId: string | null;
+  details: string | null;
+  createdAt: string;
+}
+
+export interface ApiAuditListResponse {
+  entries: ApiAuditEntry[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -340,6 +398,37 @@ export const api = {
       body: JSON.stringify(input),
     }),
   me: () => request<{ user: ApiUser }>("/api/auth/me"),
+  forgotPassword: (email: string) =>
+    request<{ message: string }>("/api/auth/forgot-password", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  resetPassword: (token: string, password: string) =>
+    request<{ message: string }>("/api/auth/reset-password", {
+      method: "POST",
+      body: JSON.stringify({ token, password }),
+    }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ message: string }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, newPassword }),
+    }),
+  updateProfile: (input: { firstName?: string; lastName?: string; email?: string }) =>
+    request<{ user: ApiUser }>("/api/auth/me", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    }),
+  getDataExport: () =>
+    request<ApiDataExportResponse>("/api/me/data-export", { method: "GET" }),
+  deleteAccount: () =>
+    request<{ message: string }>("/api/me", { method: "DELETE", body: JSON.stringify({}) }),
+  getPreferences: () =>
+    request<{ preferences: ApiPreferences }>("/api/me/preferences", { method: "GET" }),
+  updatePreferences: (preferences: ApiPreferences) =>
+    request<{ preferences: ApiPreferences }>("/api/me/preferences", {
+      method: "PUT",
+      body: JSON.stringify(preferences),
+    }),
   listEvents: (page = 1, pageSize = 100) =>
     request<{ events: ApiEvent[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(
       `/api/events?page=${page}&pageSize=${pageSize}`,
@@ -490,9 +579,28 @@ export const api = {
       `/api/events/${encodeURIComponent(eventId)}/rsvps/${encodeURIComponent(registrationId)}/reject`,
       { method: "POST", body: JSON.stringify({}) },
     ),
+  bulkApproveOrganiserRsvps: (eventId: string, registrationIds: string[]) =>
+    request<ApiBulkRsvpResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps/bulk-approve`,
+      { method: "POST", body: JSON.stringify({ registrationIds }) },
+    ),
+  bulkDeclineOrganiserRsvps: (eventId: string, registrationIds: string[]) =>
+    request<ApiBulkRsvpResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/rsvps/bulk-decline`,
+      { method: "POST", body: JSON.stringify({ registrationIds }) },
+    ),
+  listEventAudit: (eventId: string, page = 1, pageSize = 20) =>
+    request<ApiAuditListResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/audit?page=${page}&pageSize=${pageSize}`,
+    ),
   issueEventTickets: (eventId: string) =>
     request<{ tickets: Array<{ attendeeId: string; ticketId: string; qrToken: string }>; issuedCount: number }>(
       `/api/events/${encodeURIComponent(eventId)}/tickets/issue`,
+      { method: "POST", body: JSON.stringify({}) },
+    ),
+  resendTicketEmail: (eventId: string, ticketId: string) =>
+    request<{ ticketId: string; deliveryStatus: string }>(
+      `/api/events/${encodeURIComponent(eventId)}/tickets/${encodeURIComponent(ticketId)}/resend-email`,
       { method: "POST", body: JSON.stringify({}) },
     ),
   reissueAttendeeTicket: (eventId: string, attendeeId: string) =>
@@ -527,8 +635,12 @@ export interface ApiAttendee {
   attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
   registrationStatus: "PENDING" | "APPROVED" | "DECLINED" | "REJECTED" | "CANCELLED" | "NOT_REQUIRED";
   hasTicket: boolean;
+  ticketId?: string | null;
+  ticketStatus?: "ISSUED" | "USED" | "VOID" | null;
   checkedIn: boolean;
   checkedInAt: string | null;
+  deliveryStatus?: "QUEUED" | "SENT" | "FAILED" | null;
+  deliveryError?: string | null;
 }
 
 export interface ApiAttendeeListResponse {
