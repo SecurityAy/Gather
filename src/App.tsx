@@ -14,7 +14,7 @@ import JSZip from "jszip";
 import { formatDate, formatTime, localDateTime, PlatformProvider, publicEventFromApi, slugify, usePlatform } from "./platform";
 import type { EventRecord, GalleryImage } from "./platform";
 import { api, ApiError } from "./api/client";
-import type { ApiAttendee, ApiOrganiserRsvpRegistration, ApiRsvpConfirmationResponse } from "./api/client";
+import type { ApiAttendee, ApiOrganiserRsvpRegistration, ApiRsvpConfirmationResponse, ApiTicket } from "./api/client";
 import { readRsvpRecord, readRsvpToken, saveRsvpRecord } from "./rsvpStorage";
 import { SkeletonList } from "./Skeleton";
 
@@ -1190,7 +1190,7 @@ function EventOverviewPage() {
 
 function GuestManagementPage() {
   const { eventId = "" } = useParams();
-  const { getEvent } = usePlatform();
+  const { getEvent, refreshEvent, notify } = usePlatform();
   const event = getEvent(eventId);
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
@@ -1201,6 +1201,11 @@ function GuestManagementPage() {
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [bulkBusy, setBulkBusy] = useState<"approve" | "decline" | null>(null);
+  const [bulkMessage, setBulkMessage] = useState("");
+  const [bulkError, setBulkError] = useState("");
+  const [bulkTickets, setBulkTickets] = useState<Array<{ name: string; token: string }>>([]);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 680px)");
     const updateView = () => setView(media.matches ? "cards" : "table");
@@ -1228,6 +1233,56 @@ function GuestManagementPage() {
   }, [event?.id, page, reloadCount]);
   if (!event) return <NotFoundPage />;
   const filters = ["All", "Pending", "Approved", "Rejected", "Cancelled", "Not required", "Not attending"];
+  const pendingOnPage = registrations.filter((item) => item.status === "PENDING");
+  const selectablePending = pendingOnPage.filter((item) => item.attendanceIntent === "ATTENDING");
+  const allSelected = selectablePending.length > 0 && selectablePending.every((item) => selected.includes(item.id));
+  const toggleSelect = (id: string) => setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const toggleSelectAll = () => setSelected(allSelected ? [] : selectablePending.map((item) => item.id));
+  const copyToken = (token: string, name: string) => {
+    if (!navigator.clipboard) {
+      notify(`Copy this code for ${name}: ${token}`);
+      return;
+    }
+    void navigator.clipboard.writeText(token).then(
+      () => notify(`Code for ${name} copied.`),
+      () => notify(`Could not copy automatically. Code for ${name}: ${token}`, "error"),
+    );
+  };
+
+  const runBulk = async (action: "approve" | "decline") => {
+    if (bulkBusy || selected.length === 0) return;
+    setBulkBusy(action);
+    setBulkError("");
+    setBulkMessage("");
+    setBulkTickets([]);
+    try {
+      const result = action === "approve"
+        ? await api.bulkApproveOrganiserRsvps(event.id, selected)
+        : await api.bulkDeclineOrganiserRsvps(event.id, selected);
+      const failed = result.results.filter((item) => !item.ok);
+      const succeeded = result.results.filter((item) => item.ok);
+      const tokens = result.results.flatMap((item) => (item.tickets ?? []).map((ticket) => ({
+        name: (() => {
+          const registration = registrations.find((entry) => entry.id === item.registrationId);
+          const primary = registration?.attendees.find((attendee) => attendee.attendeeType === "PRIMARY");
+          return primary ? `${primary.firstName} ${primary.lastName}`.trim() : "Guest";
+        })(),
+        token: ticket.qrToken,
+      })));
+      setBulkTickets(tokens);
+      const summary = `${succeeded.length} ${action === "approve" ? "approved" : "declined"}`;
+      setBulkMessage(failed.length
+        ? `${summary}, ${failed.length} could not be processed: ${failed.map((item) => item.error ?? "unknown error").join("; ")}`
+        : summary.charAt(0).toUpperCase() + summary.slice(1) + ".");
+      setSelected([]);
+      setReloadCount((current) => current + 1);
+      void refreshEvent(event.id).catch(() => undefined);
+    } catch (reason) {
+      setBulkError(reason instanceof Error ? reason.message : "The bulk update could not be completed.");
+    } finally {
+      setBulkBusy(null);
+    }
+  };
   const resultRows = registrations.map((registration) => {
     const primary = registration.attendees.find((attendee) => attendee.attendeeType === "PRIMARY");
     const additional = registration.attendees.filter((attendee) => attendee.attendeeType === "ADDITIONAL");
@@ -1282,10 +1337,34 @@ function GuestManagementPage() {
       )}
     </section>
     <div className="guest-summary-grid">{[{ value: pagination.total, label: "Total RSVPs", color: "lavender" }, { value: registrations.length, label: "On this page", color: "peach" }].map((stat) => <div className="guest-summary" key={stat.label}><span className={`summary-dot ${stat.color}`} /><b>{String(stat.value).padStart(2, "0")}</b><small>{stat.label}</small></div>)}</div>
-    <section className="panel guest-list-panel"><div className="guest-toolbar"><div className="guest-filter-tabs">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}<span>{pageCounts(item)}</span></button>)}</div><div className="guest-search-row"><div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page…" /></div><div className="view-switch"><button aria-label="Table view" className={view === "table" ? "selected" : ""} onClick={() => setView("table")}><ListFilter size={16} /></button><button aria-label="Card view" className={view === "cards" ? "selected" : ""} onClick={() => setView("cards")}><LayoutDashboard size={16} /></button></div></div></div>
+    <section className="panel guest-list-panel">
+      {selected.length > 0 && <div className="bulk-action-bar" role="region" aria-label="Bulk RSVP actions">
+        <span className="bulk-count">{selected.length} selected</span>
+        <button className="button button-outline button-sm" onClick={() => setSelected([])} disabled={bulkBusy !== null}>Clear</button>
+        <button className="button button-outline button-sm" onClick={() => void runBulk("decline")} disabled={bulkBusy !== null}>
+          {bulkBusy === "decline" ? <><LoaderCircle className="spin" size={14} /> Declining…</> : "Decline selected"}
+        </button>
+        <button className="button button-dark button-sm" onClick={() => void runBulk("approve")} disabled={bulkBusy !== null}>
+          {bulkBusy === "approve" ? <><LoaderCircle className="spin" size={14} /> Approving…</> : "Approve selected"}
+        </button>
+      </div>}
+      {bulkError && <p className="inline-error" role="alert">{bulkError}</p>}
+      {bulkMessage && <p className="inline-success" role="status">{bulkMessage}</p>}
+      {bulkTickets.length > 0 && <section className="panel issued-token-panel" aria-label="Newly issued ticket codes from bulk approval">
+        <div className="panel-heading"><div><span className="panel-kicker">NEWLY ISSUED — COPY NOW</span><h2>{bulkTickets.length} new ticket code{bulkTickets.length === 1 ? "" : "s"}</h2></div><ShieldCheck size={17} /></div>
+        <p className="muted-copy">Gather does not store QR codes, so these can only be shown now. Copy each code and send it to the guest.</p>
+        <div className="issued-token-list">
+          {bulkTickets.map((item, index) => <div className="issued-token" key={`${item.name}-${index}`}>
+            <span className="guest-avatar">{item.name.split(" ").map((part) => part[0]).join("")}</span>
+            <span className="issued-token-copy"><b>{item.name}</b><code>{item.token}</code></span>
+            <button className="button button-outline button-sm" onClick={() => copyToken(item.token, item.name)}>Copy</button>
+          </div>)}
+        </div>
+      </section>}
+      <div className="guest-toolbar"><div className="guest-filter-tabs">{filters.map((item) => <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)}>{item}<span>{pageCounts(item)}</span></button>)}</div><div className="guest-search-row"><div className="search-field"><Search size={16} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search this page…" /></div><div className="view-switch"><button aria-label="Table view" className={view === "table" ? "selected" : ""} onClick={() => setView("table")}><ListFilter size={16} /></button><button aria-label="Card view" className={view === "cards" ? "selected" : ""} onClick={() => setView("cards")}><LayoutDashboard size={16} /></button></div></div></div>
       {loading ? <SkeletonList rows={5} label="Loading RSVPs" />
           : loadError ? <EmptyState icon={<XCircle size={22} />} title="RSVPs couldn't load." text={loadError} action={<button className="button button-outline" onClick={() => setReloadCount((current) => current + 1)}>Try again</button>} />
-          : results.length ? view === "table" ? <div className="table-scroll"><table className="guest-table"><thead><tr><th>PRIMARY GUEST</th><th>PHONE</th><th>ATTENDANCE</th><th>ADDITIONAL GUESTS</th><th>SUBMITTED</th><th>STATUS</th><th aria-label="Details" /></tr></thead><tbody>{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; return <tr key={registration.id}><td><Link to={`/dashboard/events/${event.id}/guests/${registration.id}`} className="guest-name-cell"><span className="guest-avatar">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><span><b>{name}</b><small>{primary?.email || "Email not provided"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</small></span></Link></td><td>{primary?.phone || "Not provided"}</td><td>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</td><td>{additional.length ? additional.map(fullName).join(", ") : "None"}</td><td>{dateLabel(registration.createdAt)}</td><td><StatusBadge status={statusLabel(registration.status)} /></td><td><Link className="mini-action" to={`/dashboard/events/${event.id}/guests/${registration.id}`} aria-label={`View ${name}`}><ArrowRight size={14} /></Link></td></tr>; })}</tbody></table></div> : <div className="guest-card-grid">{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; return <Link className="guest-card" key={registration.id} to={`/dashboard/events/${event.id}/guests/${registration.id}`}><div className="guest-card-top"><span className="guest-avatar guest-avatar-large">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><StatusBadge status={statusLabel(registration.status)} /></div><h3>{name}</h3><p>{primary?.email || "Email not provided"}</p><div className="guest-card-detail"><span>{primary?.phone || "Phone not provided"}</span><span>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</span></div><p>{additional.length ? `Additional guests: ${additional.map(fullName).join(", ")}` : "No additional guests"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</p><small>{dateLabel(registration.createdAt)}</small></Link>; })}</div>
+          : results.length ? view === "table" ? <div className="table-scroll"><table className="guest-table"><thead><tr><th aria-label="Select" className="bulk-select-cell">{selectablePending.length > 0 && <input type="checkbox" aria-label="Select all pending on this page" checked={allSelected} onChange={toggleSelectAll} />}</th><th>PRIMARY GUEST</th><th>PHONE</th><th>ATTENDANCE</th><th>ADDITIONAL GUESTS</th><th>SUBMITTED</th><th>STATUS</th><th aria-label="Details" /></tr></thead><tbody>{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; const canSelect = registration.status === "PENDING" && registration.attendanceIntent === "ATTENDING"; return <tr key={registration.id}><td className="bulk-select-cell">{canSelect && <input type="checkbox" aria-label={`Select ${name}`} checked={selected.includes(registration.id)} onChange={() => toggleSelect(registration.id)} />}</td><td><Link to={`/dashboard/events/${event.id}/guests/${registration.id}`} className="guest-name-cell"><span className="guest-avatar">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><span><b>{name}</b><small>{primary?.email || "Email not provided"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</small></span></Link></td><td>{primary?.phone || "Not provided"}</td><td>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</td><td>{additional.length ? additional.map(fullName).join(", ") : "None"}</td><td>{dateLabel(registration.createdAt)}</td><td><StatusBadge status={statusLabel(registration.status)} /></td><td><Link className="mini-action" to={`/dashboard/events/${event.id}/guests/${registration.id}`} aria-label={`View ${name}`}><ArrowRight size={14} /></Link></td></tr>; })}</tbody></table></div> : <div className="guest-card-grid">{results.map(({ registration, primary, additional, fullName }) => { const name = primary ? fullName(primary) : "Primary guest unavailable"; return <Link className="guest-card" key={registration.id} to={`/dashboard/events/${event.id}/guests/${registration.id}`}><div className="guest-card-top"><span className="guest-avatar guest-avatar-large">{primary ? name.split(" ").map((p) => p[0]).join("") : "?"}</span><StatusBadge status={statusLabel(registration.status)} /></div><h3>{name}</h3><p>{primary?.email || "Email not provided"}</p><div className="guest-card-detail"><span>{primary?.phone || "Phone not provided"}</span><span>{registration.attendanceIntent === "ATTENDING" ? "Attending" : "Not attending"}</span></div><p>{additional.length ? `Additional guests: ${additional.map(fullName).join(", ")}` : "No additional guests"}{registration.relationshipToGraduate ? ` · ${registration.relationshipToGraduate}` : ""}</p><small>{dateLabel(registration.createdAt)}</small></Link>; })}</div>
           : <EmptyState icon={<Search size={22} />} title={registrations.length ? "No RSVPs match that." : "Your guest list is waiting."} text={registrations.length ? "Try another name or filter on this page." : "When guests RSVP, their registrations will appear here."} />}
       {!loading && !loadError && pagination.totalPages > 1 && <div className="guest-pagination"><button className="button button-outline button-sm" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={pagination.page <= 1}><ChevronLeft size={15} /> Previous</button><span>Page {pagination.page} of {pagination.totalPages} · {pagination.total} registrations</span><button className="button button-outline button-sm" onClick={() => setPage((current) => Math.min(pagination.totalPages, current + 1))} disabled={pagination.page >= pagination.totalPages}>Next <ChevronRight size={15} /></button></div>}
     </section>
@@ -1392,6 +1471,7 @@ function TicketManagementPage() {
   const event = getEvent(eventId);
   const [page, setPage] = useState(1);
   const [attendees, setAttendees] = useState<ApiAttendee[]>([]);
+  const [tickets, setTickets] = useState<ApiTicket[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -1424,6 +1504,10 @@ function TicketManagementPage() {
         setLoadError(reason instanceof Error ? reason.message : "Could not load the attendee list.");
       })
       .finally(() => { if (active) setLoading(false); });
+    // Ticket delivery state is a separate list; a failure here must not blank the attendee table.
+    void api.listEventTickets(event.id, page, pageSize)
+      .then((result) => { if (active) setTickets(result.tickets); })
+      .catch(() => { if (active) setTickets([]); });
     return () => { active = false; };
   }, [event?.id, page, reloadCount]);
   useEffect(() => {
@@ -1431,6 +1515,7 @@ function TicketManagementPage() {
     namesRef.current = new Map();
     setPage(1);
     setAttendees([]);
+    setTickets([]);
     setPagination({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
     setIssueError("");
     setLoading(true);
@@ -1514,19 +1599,19 @@ function TicketManagementPage() {
 
   const handleResendEmail = async (attendee: ApiAttendee) => {
     if (ticketAction) return;
-    const ticketId = attendee.ticketId;
-    if (!ticketId) {
+    const ticket = tickets.find((item) => item.attendeeId === attendee.id);
+    if (!ticket) {
       setIssueError("This attendee has no ticket to resend.");
       return;
     }
     setTicketAction({ attendeeId: attendee.id, kind: "resend" });
     setIssueError("");
     try {
-      const result = await api.resendTicketEmail(event.id, ticketId);
+      const result = await api.resendTicketEmail(event.id, ticket.id);
       setReloadCount((current) => current + 1);
-      notify(result.deliveryStatus === "SENT"
+      notify(result.message || (result.deliveryStatus === "SENT"
         ? `Ticket email sent to ${nameOf(attendee)}.`
-        : `Ticket email queued for ${nameOf(attendee)}.`);
+        : `Ticket email queued for ${nameOf(attendee)}.`));
     } catch (reason) {
       setIssueError(reason instanceof Error ? reason.message : "Ticket email could not be sent. Try again.");
     } finally {
@@ -1566,7 +1651,7 @@ function TicketManagementPage() {
                   : <span className="muted-copy">Not checked in</span>}</td>
                 <td><span className="ticket-row-actions">
                   {attendee.hasTicket && !attendee.checkedIn && <>
-                    {attendee.deliveryStatus === "FAILED" && <span className="delivery-failed" title={attendee.deliveryError ?? undefined}>Email failed</span>}
+                    {tickets.find((item) => item.attendeeId === attendee.id)?.deliveryStatus === "FAILED" && <span className="delivery-failed" title={tickets.find((item) => item.attendeeId === attendee.id)?.lastDeliveryAt ?? undefined}>Email failed</span>}
                     <button className="button button-outline button-sm" onClick={() => void handleResendEmail(attendee)} disabled={ticketAction !== null}>
                       {ticketAction?.attendeeId === attendee.id && ticketAction.kind === "resend" ? <><LoaderCircle className="spin" size={13} /> Sending…</> : "Resend email"}
                     </button>

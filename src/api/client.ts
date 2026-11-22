@@ -11,32 +11,86 @@ export interface ApiUser {
   accountStatus: string;
   emailVerifiedAt: string | null;
   profileImageUrl: string | null;
+  emailNotifications?: boolean;
+  locale?: string;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface ApiPreferences {
   emailNotifications: boolean;
+  locale?: string;
 }
 
 export interface ApiDataExportResponse {
   exportedAt: string;
-  user: ApiUser;
+  user: ApiUser & { emailNotifications?: boolean; locale?: string };
   events: Array<{
     id: string;
     title: string;
     slug: string;
+    eventCategory?: string;
+    description?: string | null;
+    graduateName?: string | null;
     eventStatus: string;
     eventDate: string | null;
+    timezone?: string | null;
     venueName: string | null;
-    registrationCount: number;
-    approvedAttendeeCount: number;
+    venueAddress?: string | null;
+    publishedAt?: string | null;
     createdAt: string;
+    updatedAt?: string;
+    registrationCount?: number;
+    approvedAttendeeCount?: number;
   }>;
   registrations: Array<{
-    eventTitle: string;
+    id?: string;
+    eventId?: string;
+    eventTitle?: string;
+    event?: { id: string; title: string; slug: string };
     attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
     status: string;
+    relationshipToGraduate?: string | null;
+    approvedAt?: string | null;
+    declinedAt?: string | null;
+    cancelledAt?: string | null;
+    createdAt: string;
+    updatedAt?: string;
+    attendees?: Array<{
+      id: string;
+      firstName: string;
+      lastName: string;
+      email: string;
+      attendeeType: "PRIMARY" | "ADDITIONAL";
+      createdAt?: string;
+      ticket?: {
+        id: string;
+        ticketStatus: string;
+        deliveryStatus: string;
+        issuedAt?: string;
+        usedAt?: string | null;
+        lastDeliveryAt?: string | null;
+      } | null;
+    }>;
+  }>;
+  checkIns?: Array<{
+    id: string;
+    ticketId: string;
+    checkedInAt: string;
+    ticket?: {
+      attendee: {
+        id: string;
+        firstName: string;
+        lastName: string;
+        registration: { id: string; eventId: string };
+      };
+    };
+  }>;
+  auditLogs?: Array<{
+    id: string;
+    eventId: string | null;
+    action: string;
+    details: string | null;
     createdAt: string;
   }>;
 }
@@ -386,6 +440,76 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return payload as T;
 }
 
+export interface ApiPage<T> {
+  data: T;
+  etag: string | null;
+  notModified: boolean;
+}
+
+const etagCache = new Map<string, string>();
+
+/**
+ * GET a cacheable list endpoint (attendees, RSVPs, tickets, audit).
+ *
+ * The backend derives a content hash `ETag` and answers `If-None-Match` with an
+ * empty `304`. We send the stored tag, so an unchanged list costs no body and
+ * `notModified` comes back true for the caller to skip the re-render.
+ */
+export async function getCachedPage<T>(path: string): Promise<ApiPage<T>> {
+  if (!apiBaseUrl) {
+    throw new ApiError("The API URL is not configured. Set VITE_API_BASE_URL and rebuild the frontend.", 0);
+  }
+
+  const headers = new Headers();
+  const token = getAccessToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  headers.set("x-device-id", getDeviceId());
+
+  const known = etagCache.get(path);
+  if (known) headers.set("If-None-Match", known);
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl}${path}`, {
+      method: "GET",
+      headers,
+      credentials: "include",
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError("Could not reach Gather. Check the API connection and try again.", 0);
+  }
+
+  if (response.status === 304) {
+    return { data: undefined as T, etag: known ?? null, notModified: true };
+  }
+
+  if (!response.ok) {
+    if (response.status === 401 && token) {
+      clearAccessToken();
+      window.dispatchEvent(new Event("gather:unauthorized"));
+    }
+    let message = "The request could not be completed.";
+    try {
+      const body = await response.json() as { message?: unknown };
+      if (typeof body?.message === "string") message = body.message;
+    } catch {
+      // keep the generic message
+    }
+    throw new ApiError(message, response.status);
+  }
+
+  const etag = response.headers.get("ETag");
+  if (etag) etagCache.set(path, etag);
+
+  const payload = await response.json() as T;
+  return { data: payload, etag, notModified: false };
+}
+
+export function clearEtagCache(): void {
+  etagCache.clear();
+}
+
 export const api = {
   register: (input: { firstName: string; lastName: string; email: string; password: string }) =>
     request<{ user: ApiUser; token: string }>("/api/auth/register", {
@@ -599,7 +723,7 @@ export const api = {
       { method: "POST", body: JSON.stringify({}) },
     ),
   resendTicketEmail: (eventId: string, ticketId: string) =>
-    request<{ ticketId: string; deliveryStatus: string }>(
+    request<{ ticketId: string; attendeeId: string; deliveryStatus: string; message?: string }>(
       `/api/events/${encodeURIComponent(eventId)}/tickets/${encodeURIComponent(ticketId)}/resend-email`,
       { method: "POST", body: JSON.stringify({}) },
     ),
@@ -616,6 +740,10 @@ export const api = {
   listEventAttendees: (eventId: string, page = 1, pageSize = 50) =>
     request<ApiAttendeeListResponse>(
       `/api/events/${encodeURIComponent(eventId)}/attendees?page=${page}&pageSize=${pageSize}`,
+    ),
+  listEventTickets: (eventId: string, page = 1, pageSize = 50) =>
+    request<ApiTicketListResponse>(
+      `/api/events/${encodeURIComponent(eventId)}/tickets?page=${page}&pageSize=${pageSize}`,
     ),
   checkInTicket: (eventId: string, qrToken: string) =>
     request<ApiCheckInResult>(
@@ -635,12 +763,35 @@ export interface ApiAttendee {
   attendanceIntent: "ATTENDING" | "NOT_ATTENDING";
   registrationStatus: "PENDING" | "APPROVED" | "DECLINED" | "REJECTED" | "CANCELLED" | "NOT_REQUIRED";
   hasTicket: boolean;
-  ticketId?: string | null;
   ticketStatus?: "ISSUED" | "USED" | "VOID" | null;
   checkedIn: boolean;
   checkedInAt: string | null;
-  deliveryStatus?: "QUEUED" | "SENT" | "FAILED" | null;
+  deliveryStatus?: "NOT_SENT" | "SENT" | "FAILED" | null;
   deliveryError?: string | null;
+}
+
+export interface ApiTicket {
+  id: string;
+  attendeeId: string;
+  attendeeName: string;
+  ticketStatus: "ISSUED" | "USED" | "VOID";
+  revoked: boolean;
+  deliveryStatus: "NOT_SENT" | "SENT" | "FAILED";
+  lastDeliveryAt: string | null;
+  deliveryAttempts: number;
+  issuedAt: string;
+  usedAt: string | null;
+  checkedInAt: string | null;
+}
+
+export interface ApiTicketListResponse {
+  tickets: ApiTicket[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+  };
 }
 
 export interface ApiAttendeeListResponse {

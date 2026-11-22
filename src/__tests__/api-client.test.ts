@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, setAccessToken } from "../api/client";
+import { api, ApiError, clearEtagCache, getCachedPage, setAccessToken } from "../api/client";
 import { createFetchMock, jsonResponse, testUser } from "./test-utils";
 
 function lastCall(mock: ReturnType<typeof createFetchMock>) {
@@ -144,6 +144,8 @@ describe("api client", () => {
   it("calls the correct endpoints and bodies for critical flows", async () => {
     const mock = createFetchMock([
       { method: "POST", path: /.*/, body: {} },
+      { method: "PATCH", path: /.*/, body: {} },
+      { method: "PUT", path: /.*/, body: {} },
       { method: "GET", path: /.*/, body: {} },
     ]);
     vi.stubGlobal("fetch", mock);
@@ -187,5 +189,90 @@ describe("api client", () => {
     expect(call.url.pathname).toBe("/api/events/ev1/attendees");
     expect(call.url.search).toContain("page=2");
     expect(call.url.search).toContain("pageSize=20");
+
+    await api.bulkApproveOrganiserRsvps("ev1", ["reg1"]);
+    call = lastCall(mock);
+    expect(call.method).toBe("POST");
+    expect(call.url.pathname).toBe("/api/events/ev1/rsvps/bulk-approve");
+    expect(JSON.parse(String(call.body))).toEqual({ registrationIds: ["reg1"] });
+
+    await api.bulkDeclineOrganiserRsvps("ev1", ["reg1"]);
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/events/ev1/rsvps/bulk-decline");
+
+    await api.listEventTickets("ev1", 1, 20);
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/events/ev1/tickets");
+
+    await api.listEventAudit("ev1", 1, 20);
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/events/ev1/audit");
+
+    await api.resendTicketEmail("ev1", "t1");
+    call = lastCall(mock);
+    expect(call.method).toBe("POST");
+    expect(call.url.pathname).toBe("/api/events/ev1/tickets/t1/resend-email");
+
+    await api.forgotPassword("ada@example.com");
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/auth/forgot-password");
+    expect(JSON.parse(String(call.body))).toEqual({ email: "ada@example.com" });
+
+    await api.resetPassword("tok", "password123");
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/auth/reset-password");
+    expect(JSON.parse(String(call.body))).toEqual({ token: "tok", password: "password123" });
+
+    await api.changePassword("old", "new");
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/auth/change-password");
+
+    await api.updateProfile({ firstName: "Grace" });
+    call = lastCall(mock);
+    expect(call.method).toBe("PATCH");
+    expect(call.url.pathname).toBe("/api/auth/me");
+
+    await api.getPreferences();
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/me/preferences");
+
+    await api.updatePreferences({ emailNotifications: false });
+    call = lastCall(mock);
+    expect(call.method).toBe("PUT");
+    expect(call.url.pathname).toBe("/api/me/preferences");
+
+    await api.getDataExport();
+    call = lastCall(mock);
+    expect(call.url.pathname).toBe("/api/me/data-export");
+  });
+
+  it("reuses a cached ETag and skips the body on a 304", async () => {
+    clearEtagCache();
+    setAccessToken("token-123");
+    const body = { attendees: [], pagination: { page: 1, pageSize: 20, total: 0, totalPages: 0 } };
+
+    const mock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      if (headers.get("If-None-Match") === '"abc123"') {
+        return new Response(null, { status: 304 });
+      }
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ETag: '"abc123"' },
+      });
+    });
+    vi.stubGlobal("fetch", mock);
+
+    const first = await getCachedPage<typeof body>("/api/events/ev1/attendees?page=1&pageSize=20");
+    expect(first.notModified).toBe(false);
+    expect(first.etag).toBe('"abc123"');
+    expect(first.data.attendees).toEqual([]);
+
+    const second = await getCachedPage<typeof body>("/api/events/ev1/attendees?page=1&pageSize=20");
+    expect(second.notModified).toBe(true);
+    expect(second.etag).toBe('"abc123"');
+
+    const secondHeaders = new Headers((mock.mock.calls[1][1] ?? {}).headers);
+    expect(secondHeaders.get("If-None-Match")).toBe('"abc123"');
   });
 });

@@ -175,6 +175,48 @@ describe("TicketManagementPage", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: /reissue/i })).toBeNull());
   });
 
+  it("loads attendee delivery state from the tickets list and resends the email", async () => {
+    const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "GET" && url.pathname === "/api/events/ev1/attendees") {
+        return jsonResponse(200, attendeesResponse([
+          makeAttendee({ id: "a1", firstName: "Ada", lastName: "Lovelace", hasTicket: true, ticketStatus: "ISSUED" }),
+        ]));
+      }
+      if (method === "GET" && url.pathname === "/api/events/ev1/tickets") {
+        return jsonResponse(200, {
+          tickets: [{
+            id: "t1",
+            attendeeId: "a1",
+            attendeeName: "Ada Lovelace",
+            ticketStatus: "ISSUED",
+            revoked: false,
+            deliveryStatus: "FAILED",
+            lastDeliveryAt: null,
+            deliveryAttempts: 3,
+            issuedAt: "2026-11-01T00:00:00.000Z",
+            usedAt: null,
+            checkedInAt: null,
+          }],
+          pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+        });
+      }
+      if (method === "POST" && url.pathname === "/api/events/ev1/tickets/t1/resend-email") {
+        return jsonResponse(200, { ticketId: "t1", attendeeId: "a1", deliveryStatus: "NOT_SENT", message: "Ticket email queued." });
+      }
+      return createFetchMock(baseRoutes())(input, init);
+    });
+    vi.stubGlobal("fetch", mock);
+
+    renderApp("/dashboard/events/ev1/tickets");
+    await screen.findByText("Ada Lovelace");
+    expect(await screen.findByText("Email failed")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /resend email/i }));
+    expect(await screen.findByText("Ticket email queued.")).toBeTruthy();
+  });
+
   it("does not overwrite a newly selected event with a stale attendee response", async () => {
     let resolveEv2: (value: Response) => void = () => undefined;
     const ev2Promise = new Promise<Response>((resolve) => { resolveEv2 = resolve; });

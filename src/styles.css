@@ -365,6 +365,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .detail-issued-tickets { margin-top: 14px; }
 .checkin-cell { display: inline-flex; align-items: center; gap: 5px; color: #5e6d52; }
 .ticket-row-actions { display: inline-flex; gap: 6px; }
+.bulk-action-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; padding: 10px 12px; border: 1px solid #e7e9e0; border-radius: var(--r-lg); background: #f8f9f5; }
+.bulk-count { margin-right: auto; font-size: 10px; font-weight: 600; }
+.bulk-select-cell { width: 34px; text-align: center; }
 .delivery-failed { color: var(--danger); font-size: 9px; font-weight: 600; }
 .settings-inline-form { padding: 14px; border: 1px solid #efeee8; border-radius: var(--r-lg); background: #fbfbf8; }
 .settings-inline-actions { display: flex; flex-wrap: wrap; gap: 8px; }

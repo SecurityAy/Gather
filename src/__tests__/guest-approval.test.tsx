@@ -145,3 +145,65 @@ describe("GuestDetailsPage", () => {
     expect(screen.queryByText(/registration approved/i)).toBeNull();
   });
 });
+
+describe("GuestManagementPage bulk actions", () => {
+  function listRoutes(extra: FetchRoute[] = []): FetchRoute[] {
+    return baseRoutes([
+      {
+        method: "GET",
+        path: "/api/events/ev1/rsvps",
+        body: {
+          registrations: [pendingRegistration],
+          pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+        },
+      },
+      ...extra,
+    ]);
+  }
+
+  it("approves the selected pending registrations in one request", async () => {
+    const mock = createFetchMock(listRoutes([
+      {
+        method: "POST",
+        path: "/api/events/ev1/rsvps/bulk-approve",
+        body: {
+          results: [{ registrationId: "reg1", ok: true, status: "APPROVED", tickets: [{ attendeeId: "a1", ticketId: "t1", qrToken: "BULK-TOKEN" }] }],
+        },
+      },
+    ]));
+    vi.stubGlobal("fetch", mock);
+
+    renderAppWithNav("/dashboard/events/ev1/guests", "/dashboard/events/ev1", "go-overview");
+    await screen.findByText("Ada Lovelace");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /select ada lovelace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve selected/i }));
+
+    expect(await screen.findByText("BULK-TOKEN")).toBeTruthy();
+    expect(await screen.findByText(/1 approved/i)).toBeTruthy();
+  });
+
+  it("reports partial failures from the bulk endpoint", async () => {
+    const mock = createFetchMock(listRoutes([
+      {
+        method: "POST",
+        path: "/api/events/ev1/rsvps/bulk-approve",
+        body: {
+          results: [
+            { registrationId: "reg1", ok: true, status: "APPROVED" },
+            { registrationId: "reg2", ok: false, error: "Not enough guest spaces for this group." },
+          ],
+        },
+      },
+    ]));
+    vi.stubGlobal("fetch", mock);
+
+    renderAppWithNav("/dashboard/events/ev1/guests", "/dashboard/events/ev1", "go-overview");
+    await screen.findByText("Ada Lovelace");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: /select ada lovelace/i }));
+    fireEvent.click(screen.getByRole("button", { name: /approve selected/i }));
+
+    expect(await screen.findByText(/not enough guest spaces/i)).toBeTruthy();
+  });
+});
